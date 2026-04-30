@@ -20,6 +20,9 @@
 # production
 /build
 
+# local PDF uploads (dev without Vercel Blob)
+.data/
+
 # misc
 .DS_Store
 *.pem

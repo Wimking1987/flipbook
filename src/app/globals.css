@@ -1,7 +1,7 @@
 @import "tailwindcss";
 
 :root {
-  --background: #ffffff;
+  --background: #fafafa;
   --foreground: #171717;
 }
 
@@ -22,5 +22,181 @@
 body {
   background: var(--background);
   color: var(--foreground);
-  font-family: Arial, Helvetica, sans-serif;
+  font-family: var(--font-geist-sans), system-ui, sans-serif;
+}
+
+/* --- Flip-Bühne: äußerer Rahmen --- */
+.flip-viewer-stage {
+  position: relative;
+  isolation: isolate;
+  overflow: hidden;
+  box-shadow: inset 0 0 0 1px rgba(255, 255, 255, 0.06);
+}
+
+/* Volle Fläche unter dem Buch (Referenz: Mockup-Tisch / Studio) */
+.flip-surface {
+  position: absolute;
+  inset: 0;
+  z-index: 0;
+  pointer-events: none;
+}
+
+.flip-surface::before {
+  content: "";
+  position: absolute;
+  inset: 0;
+  opacity: 0.14;
+  background-image: url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' width='180' height='180'%3E%3Cfilter id='n'%3E%3CfeTurbulence type='fractalNoise' baseFrequency='0.75' numOctaves='3' stitchTiles='stitch'/%3E%3C/filter%3E%3Crect width='180' height='180' filter='url(%23n)' opacity='0.5'/%3E%3C/svg%3E");
+}
+
+.flip-surface::after {
+  content: "";
+  position: absolute;
+  inset: 0;
+  pointer-events: none;
+}
+
+/* Neutral = heller Untergrund wie Mockup-Foto */
+.flip-surface-neutral {
+  background-color: #e5e3e0;
+  background-image:
+    radial-gradient(
+      115% 95% at 50% 5%,
+      rgba(255, 255, 255, 0.97) 0%,
+      rgba(255, 255, 255, 0) 55%
+    ),
+    radial-gradient(
+      90% 70% at 50% 100%,
+      rgba(255, 255, 255, 0.35) 0%,
+      transparent 45%
+    ),
+    linear-gradient(175deg, #f4f3f1 0%, #e0deda 48%, #cfcac5 100%);
+}
+
+.flip-surface-neutral::before {
+  opacity: 0.1;
+}
+
+.flip-surface-neutral::after {
+  background: radial-gradient(
+    ellipse 100% 85% at 50% 50%,
+    transparent 38%,
+    rgba(0, 0, 0, 0.06) 100%
+  );
+}
+
+/* Holz = warme dunkle Holzplatte */
+.flip-surface-wood {
+  background-color: #2f1f14;
+  background-image:
+    linear-gradient(
+      180deg,
+      rgba(255, 255, 255, 0.09) 0%,
+      transparent 32%
+    ),
+    radial-gradient(
+      95% 65% at 50% 0%,
+      rgba(210, 168, 118, 0.45) 0%,
+      transparent 52%
+    ),
+    repeating-linear-gradient(
+      93deg,
+      rgba(0, 0, 0, 0.16) 0 1px,
+      transparent 1px 8px
+    ),
+    repeating-linear-gradient(
+      0deg,
+      rgba(255, 255, 255, 0.035) 0 1px,
+      transparent 1px 18px
+    ),
+    linear-gradient(168deg, #5d4332 0%, #4a3325 38%, #261810 78%, #120b08 100%);
+}
+
+.flip-surface-wood::before {
+  opacity: 0.09;
+}
+
+.flip-surface-wood::after {
+  background: radial-gradient(
+    ellipse 100% 85% at 50% 100%,
+    transparent 28%,
+    rgba(0, 0, 0, 0.58) 100%
+  );
+}
+
+/* Dunkel = Studio mit kühlem Verlauf */
+.flip-surface-dark {
+  background-color: #0a0d12;
+  background-image:
+    radial-gradient(
+      85% 50% at 50% 0%,
+      rgba(129, 140, 248, 0.2) 0%,
+      transparent 58%
+    ),
+    radial-gradient(
+      65% 45% at 95% 100%,
+      rgba(37, 99, 235, 0.22) 0%,
+      transparent 48%
+    ),
+    linear-gradient(198deg, #334155 0%, #1e293b 42%, #0f172a 82%, #020617 100%);
+}
+
+.flip-surface-dark::before {
+  opacity: 0.12;
+}
+
+.flip-surface-dark::after {
+  background: radial-gradient(
+    ellipse 100% 80% at 50% 48%,
+    transparent 30%,
+    rgba(0, 0, 0, 0.5) 100%
+  );
+}
+
+.flip-viewer-stage > .relative {
+  z-index: 10;
+}
+
+/* Buch-Schatten (Mockup) */
+.flip-book-mount-shadow {
+  isolation: isolate;
+  border-radius: 3px;
+}
+
+.flip-viewer-stage[data-flip-bg="neutral"] .flip-book-mount-shadow {
+  filter: drop-shadow(0 24px 40px rgba(0, 0, 0, 0.13))
+    drop-shadow(0 10px 18px rgba(0, 0, 0, 0.08))
+    drop-shadow(0 3px 6px rgba(0, 0, 0, 0.05));
+}
+
+.flip-viewer-stage[data-flip-bg="wood"] .flip-book-mount-shadow,
+.flip-viewer-stage[data-flip-bg="dark"] .flip-book-mount-shadow {
+  filter: drop-shadow(0 30px 50px rgba(0, 0, 0, 0.58))
+    drop-shadow(0 14px 28px rgba(0, 0, 0, 0.4))
+    drop-shadow(0 5px 12px rgba(0, 0, 0, 0.3));
+}
+
+/* HTML-Flip: Seiten nicht verzerren */
+.flip-page-img {
+  width: 100%;
+  height: 100%;
+  object-fit: contain;
+  object-position: center;
+  display: block;
+  pointer-events: none;
+  user-select: none;
+}
+
+.flipbook-mount-root .stf__block {
+  background: transparent !important;
+}
+
+.flipbook-mount-root.stf__parent .stf__wrapper {
+  width: auto !important;
+  max-width: 100%;
+}
+
+.flipbook-mount-root.stf__parent .stf__block {
+  width: 100%;
+  height: 100%;
 }

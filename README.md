@@ -1,36 +1,37 @@
-This is a [Next.js](https://nextjs.org) project bootstrapped with [`create-next-app`](https://nextjs.org/docs/app/api-reference/cli/create-next-app).
+# PDF Flipbook
 
-## Getting Started
+Next.js app: PDF hochladen, als Blätterbuch anzeigen, Link und iframe-Code für Wix oder andere Sites.
 
-First, run the development server:
+## Lokale Entwicklung
 
 ```bash
+npm install
 npm run dev
-# or
-yarn dev
-# or
-pnpm dev
-# or
-bun dev
 ```
 
-Open [http://localhost:3000](http://localhost:3000) with your browser to see the result.
+Ohne `BLOB_READ_WRITE_TOKEN` werden PDFs unter `.data/flipbook/` gespeichert (nur für lokale Entwicklung geeignet; auf Vercel ist das Dateisystem nicht persistent).
 
-You can start editing the page by modifying `app/page.tsx`. The page auto-updates as you edit the file.
+## Produktion (Vercel)
 
-This project uses [`next/font`](https://nextjs.org/docs/app/building-your-application/optimizing/fonts) to automatically optimize and load [Geist](https://vercel.com/font), a new font family for Vercel.
+1. Projekt mit Vercel verbinden und deployen.
+2. Im Vercel Dashboard **Blob** aktivieren und ein Read-Write-Token anlegen.
+3. Unter **Settings → Environment Variables** `BLOB_READ_WRITE_TOKEN` setzen und neu deployen.
 
-## Learn More
+## Einbinden in Wix Studio
 
-To learn more about Next.js, take a look at the following resources:
+1. Nach dem Upload den **iframe**-Block aus der Erfolgsmeldung kopieren.
+2. In Wix ein **HTML / iframe**- oder Embed-Element einfügen und den Code einfügen.
+3. Optional Hintergrund per URL: `…/embed/DOC_ID?bg=wood` (`neutral`, `wood`, `dark`).
 
-- [Next.js Documentation](https://nextjs.org/docs) - learn about Next.js features and API.
-- [Learn Next.js](https://nextjs.org/learn) - an interactive Next.js tutorial.
+## Umgebungsvariablen
 
-You can check out [the Next.js GitHub repository](https://github.com/vercel/next.js) - your feedback and contributions are welcome!
+| Variable                 | Beschreibung                          |
+| ------------------------ | ------------------------------------- |
+| `BLOB_READ_WRITE_TOKEN`  | Optional lokal; für Vercel empfohlen. |
 
-## Deploy on Vercel
+Siehe [.env.example](.env.example).
 
-The easiest way to deploy your Next.js app is to use the [Vercel Platform](https://vercel.com/new?utm_medium=default-template&filter=next.js&utm_source=create-next-app&utm_campaign=create-next-app-readme) from the creators of Next.js.
+## Limits
 
-Check out our [Next.js deployment documentation](https://nextjs.org/docs/app/building-your-application/deploying) for more details.
+- Max. 20 MB pro PDF
+- Max. 200 Seiten (Schutz für den Browser)
