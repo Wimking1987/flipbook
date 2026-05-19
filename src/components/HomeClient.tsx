@@ -49,14 +49,32 @@ export function HomeClient() {
         const fd = new FormData();
         fd.set("file", file);
         const res = await fetch("/api/upload", { method: "POST", body: fd });
-        const data = (await res.json()) as UploadResult & { error?: string };
+        const data = (await res.json()) as UploadResult & {
+          error?: string;
+          hint?: string;
+        };
         if (!res.ok) {
-          const msg =
+          let msg =
             data.error === "too_large"
               ? "Datei ist zu groß (max. 20 MB)."
               : data.error === "not_pdf"
                 ? "Keine gültige PDF-Datei."
-                : "Upload fehlgeschlagen.";
+                : data.error === "invalid_type"
+                  ? "Bitte eine PDF-Datei wählen."
+                  : data.error === "missing_file"
+                    ? "Keine Datei übermittelt."
+                    : data.error === "storage_failed"
+                      ? data.hint
+                        ? `Speichern fehlgeschlagen: ${data.hint}`
+                        : "Speichern fehlgeschlagen. Auf Vercel: Projekt öffnen → Storage → Blob anlegen/mit Projekt verbinden. Environment Variable `BLOB_READ_WRITE_TOKEN` setzen, dann Redeploy (siehe README)."
+                      : `Upload fehlgeschlagen${data.error ? ` (${data.error}).` : "."}`;
+          if (
+            data.hint &&
+            data.error !== "storage_failed" &&
+            !msg.includes(data.hint)
+          ) {
+            msg = `${msg} ${data.hint}`;
+          }
           setError(msg);
           return;
         }

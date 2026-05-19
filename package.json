@@ -6,7 +6,9 @@
     "dev": "next dev",
     "build": "next build",
     "start": "next start",
-    "lint": "eslint"
+    "lint": "eslint",
+    "sync-pdfjs": "node scripts/sync-pdfjs-public.mjs",
+    "postinstall": "node scripts/sync-pdfjs-public.mjs"
   },
   "dependencies": {
     "@vercel/blob": "^2.3.3",

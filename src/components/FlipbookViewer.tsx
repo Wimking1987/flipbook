@@ -267,11 +267,34 @@ export function FlipbookViewer({
         );
 
         const pdfjs = await import("pdfjs-dist");
-        pdfjs.GlobalWorkerOptions.workerSrc = `https://unpkg.com/pdfjs-dist@${pdfjs.version}/build/pdf.worker.min.mjs`;
+        pdfjs.GlobalWorkerOptions.workerSrc = "/pdfjs/pdf.worker.min.mjs";
+
+        const pdfResponse = await fetch(pdfUrl, { cache: "no-store" });
+        if (!pdfResponse.ok) {
+          throw new Error("pdf_fetch_failed");
+        }
+        const pdfData = await pdfResponse.arrayBuffer();
+        if (cancelled) return;
 
         const loadingTask = pdfjs.getDocument({
-          url: pdfUrl,
-          withCredentials: false,
+          data: pdfData,
+          disableAutoFetch: true,
+          disableStream: true,
+          disableRange: true,
+          wasmUrl: "/pdfjs/wasm/",
+          standardFontDataUrl: "/pdfjs/standard_fonts/",
+          cMapUrl: "/pdfjs/cmaps/",
+          cMapPacked: true,
+          /** Farbprofile für CMYK/o. ä. — ohne URL können manche Seiten leer bleiben. */
+          iccUrl: "/pdfjs/iccs/",
+          useWasm: true,
+          /**
+           * Chromiums ImageDecoder kann bei JPEG mit ICC fehlschlagen (leere Flächen);
+           * klassischer Worker-Decoder ist stabiler. Siehe pdf.js DocumentInitParameters.
+           */
+          isImageDecoderSupported: false,
+          /** Kein Cap — große eingebettete Bilder würden sonst ungezeichnet bleiben. */
+          maxImageSize: -1,
         });
         const doc = await loadingTask.promise;
         const numPages = Math.min(doc.numPages, MAX_PDF_PAGES);
@@ -297,9 +320,17 @@ export function FlipbookViewer({
           if (!ctx) throw new Error("no_canvas");
           canvas.width = Math.max(1, Math.floor(viewport.width));
           canvas.height = Math.max(1, Math.floor(viewport.height));
-          const task = page.render({ canvas, viewport });
+          ctx.fillStyle = "#ffffff";
+          ctx.fillRect(0, 0, canvas.width, canvas.height);
+          const task = page.render({ canvas, canvasContext: ctx, viewport });
           await task.promise;
-          urls.push(await canvasToObjectUrl(canvas));
+          const jpegUrl = await canvasToObjectUrl(canvas);
+          try {
+            page.cleanup();
+          } catch {
+            /* ignore */
+          }
+          urls.push(jpegUrl);
           setMessage(`Seiten rendern … ${i}/${numPages}`);
           if (cancelled) {
             for (const url of urls) {
