@@ -22,7 +22,9 @@ export default async function EmbedPage({
   const pdfUrl = `/api/pdf/${id}`;
 
   return (
-    <div className="flex h-dvh min-h-dvh w-full flex-col bg-zinc-950 p-1 sm:p-2">
+    <div
+      className={`flex h-dvh min-h-dvh w-full flex-col p-0 ${bg === "neutral" ? "bg-white" : "bg-zinc-950"}`}
+    >
       <FlipbookViewer
         pdfUrl={pdfUrl}
         background={bg}

@@ -404,12 +404,12 @@ export function FlipbookViewer({
   }, [status]);
 
   const stageShell = embed
-    ? "flip-viewer-stage relative flex min-h-0 w-full flex-1 basis-0 flex-col overflow-hidden rounded-lg"
+    ? "flip-viewer-stage relative flex min-h-0 w-full flex-1 basis-0 flex-col overflow-hidden rounded-none"
     : "flip-viewer-stage relative flex h-[min(85dvh,920px)] w-full flex-col overflow-hidden rounded-lg";
 
   return (
     <div
-      className={`flex flex-col gap-3 ${embed ? "min-h-0 flex-1" : ""} ${embed ? "" : "rounded-2xl border border-zinc-300/70 bg-transparent p-3 dark:border-zinc-600 dark:bg-transparent"} ${className}`}
+      className={`flex flex-col ${embed ? "min-h-0 flex-1 gap-0" : "gap-3"} ${embed ? "" : "rounded-2xl border border-zinc-300/70 bg-transparent p-3 dark:border-zinc-600 dark:bg-transparent"} ${className}`}
     >
       {status === "loading" && (
         <p className="text-center text-sm text-zinc-700 dark:text-zinc-300">
@@ -429,7 +429,7 @@ export function FlipbookViewer({
         />
         <div
           ref={hostRef}
-          className="relative z-10 flex min-h-0 min-w-0 flex-1 items-center justify-center p-2 sm:p-4"
+          className={`relative z-10 flex min-h-0 min-w-0 flex-1 items-center justify-center ${embed ? "p-0" : "p-2 sm:p-4"}`}
         />
       </div>
       {status === "ready" && !embed && (

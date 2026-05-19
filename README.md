@@ -39,7 +39,8 @@ Siehe [.env.example](.env.example).
 
 1. Nach dem Upload den **iframe**-Block aus der Erfolgsmeldung kopieren.
 2. In Wix ein **HTML / iframe**- oder Embed-Element einfügen und den Code einfügen.
-3. Optional Hintergrund per URL: `…/embed/DOC_ID?bg=wood` (`neutral`, `wood`, `dark`).
+3. **Vollhöhe:** Der iframe ist für `height: 100vh` gedacht — die **Sektion/Spalte** in Wix sollte genug Höhe haben und **kein zusätzliches Padding** um den Code herum nutzen, sonst wirkt der Flipbook-Bereich kleiner als die Ansicht.
+4. Optional Hintergrund per URL: `…/embed/DOC_ID?bg=wood` (`neutral`, `wood`, `dark`).
 
 ## PDF-Rendering („weiße Seiten“ bei JPEG2000 / JPX)
 
