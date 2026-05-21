@@ -1,5 +1,6 @@
 import Link from "next/link";
 import { HomeClient } from "@/components/HomeClient";
+import { blobStorageEnabled } from "@/lib/pdf-storage";
 
 export default function Home() {
   return (
@@ -14,7 +15,7 @@ export default function Home() {
           </Link>
         </div>
       </nav>
-      <HomeClient />
+      <HomeClient useClientUpload={blobStorageEnabled()} />
     </>
   );
 }

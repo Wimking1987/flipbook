@@ -1,18 +1,15 @@
 import { NextResponse } from "next/server";
-import { nanoid } from "nanoid";
 import { blobStorageEnabled, savePdfBytes } from "@/lib/pdf-storage";
 import { looksLikeUploadedPdf } from "@/lib/accept-upload-pdf";
+import {
+  buildUploadResult,
+  generateUploadId,
+  uploadErrorMessage,
+  readUploadJson,
+} from "@/lib/upload-shared";
 import { validatePdfBuffer } from "@/lib/validate-pdf";
 
-const ID_RE = /^[a-zA-Z0-9_-]{12,24}$/;
-
-function idFromRequest(): string {
-  for (let i = 0; i < 8; i++) {
-    const id = nanoid(16);
-    if (ID_RE.test(id)) return id;
-  }
-  return nanoid(16);
-}
+export const maxDuration = 60;
 
 export async function POST(request: Request) {
   const form = await request.formData();
@@ -33,7 +30,7 @@ export async function POST(request: Request) {
     return NextResponse.json({ error: "too_large" }, { status: 413 });
   }
 
-  const id = idFromRequest();
+  const id = generateUploadId();
   try {
     await savePdfBytes(id, buf);
   } catch (e) {
@@ -51,14 +48,7 @@ export async function POST(request: Request) {
   }
 
   const origin = new URL(request.url).origin;
-  const viewerUrl = `${origin}/v/${id}`;
-  const embedUrl = `${origin}/embed/${id}`;
-
-  return NextResponse.json({
-    id,
-    viewerUrl,
-    embedUrl,
-    pdfUrl: `${origin}/api/pdf/${id}`,
-    storage: blobStorageEnabled() ? "vercel_blob" : "local",
-  });
+  return NextResponse.json(
+    buildUploadResult(id, origin, blobStorageEnabled() ? "vercel_blob" : "local"),
+  );
 }

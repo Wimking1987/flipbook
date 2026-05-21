@@ -1,20 +1,23 @@
 "use client";
 
 import { useCallback, useState } from "react";
+import { upload } from "@vercel/blob/client";
 import {
   FlipbookViewer,
   type FlipBackground,
 } from "@/components/FlipbookViewer";
 import { EmbedCodeBlock } from "@/components/EmbedCodeBlock";
 import { looksLikeUploadedPdf } from "@/lib/accept-upload-pdf";
-
-type UploadResult = {
-  id: string;
-  viewerUrl: string;
-  embedUrl: string;
-  pdfUrl: string;
-  storage: string;
-};
+import { MAX_PDF_BYTES } from "@/lib/constants";
+import {
+  buildUploadResult,
+  generateUploadId,
+  readUploadJson,
+  uploadErrorMessage,
+  uploadBlobPathname,
+  type UploadResult,
+} from "@/lib/upload-shared";
+import { isPdfMagic } from "@/lib/validate-pdf";
 
 const BACKGROUNDS: { id: FlipBackground; label: string }[] = [
   { id: "neutral", label: "Neutral" },
@@ -22,7 +25,20 @@ const BACKGROUNDS: { id: FlipBackground; label: string }[] = [
   { id: "dark", label: "Dunkel" },
 ];
 
-export function HomeClient() {
+type Props = {
+  /** Production on Vercel: direct browser → Blob upload (bypasses 4.5 MB serverless body limit). */
+  useClientUpload?: boolean;
+};
+
+async function validatePdfFile(file: File): Promise<string | null> {
+  if (!looksLikeUploadedPdf(file)) return "invalid_type";
+  if (file.size > MAX_PDF_BYTES) return "too_large";
+  const head = new Uint8Array(await file.slice(0, 5).arrayBuffer());
+  if (!isPdfMagic(head)) return "not_pdf";
+  return null;
+}
+
+export function HomeClient({ useClientUpload = false }: Props) {
   const [background, setBackground] = useState<FlipBackground>("neutral");
   const [previewUrl, setPreviewUrl] = useState<string | null>(null);
   const [uploading, setUploading] = useState(false);
@@ -34,8 +50,10 @@ export function HomeClient() {
       setError(null);
       setResult(null);
       if (!file) return;
-      if (file.type && file.type !== "application/pdf") {
-        setError("Bitte eine PDF-Datei wählen.");
+
+      const validationError = await validatePdfFile(file);
+      if (validationError) {
+        setError(uploadErrorMessage(validationError));
         return;
       }
 
@@ -47,52 +65,41 @@ export function HomeClient() {
 
       setUploading(true);
       try {
+        if (useClientUpload) {
+          const id = generateUploadId();
+          await upload(uploadBlobPathname(id), file, {
+            access: "public",
+            handleUploadUrl: "/api/upload/client",
+            contentType: file.type || "application/pdf",
+            multipart: file.size > 4 * 1024 * 1024,
+          });
+          setResult(
+            buildUploadResult(id, window.location.origin, "vercel_blob"),
+          );
+          return;
+        }
+
         const fd = new FormData();
         fd.set("file", file);
         const res = await fetch("/api/upload", { method: "POST", body: fd });
-        const data = (await res.json()) as UploadResult & {
-          error?: string;
-          hint?: string;
-        };
-        if (!res.ok) {
-          let msg =
-            data.error === "too_large"
-              ? "Datei ist zu groß (max. 20 MB)."
-              : data.error === "not_pdf"
-                ? "Keine gültige PDF-Datei."
-                : data.error === "invalid_type"
-                  ? "Bitte eine PDF-Datei wählen."
-                  : data.error === "missing_file"
-                    ? "Keine Datei übermittelt."
-                    : data.error === "storage_failed"
-                      ? data.hint
-                        ? `Speichern fehlgeschlagen: ${data.hint}`
-                        : "Speichern fehlgeschlagen. Auf Vercel: Projekt öffnen → Storage → Blob anlegen/mit Projekt verbinden. Environment Variable `BLOB_READ_WRITE_TOKEN` setzen, dann Redeploy (siehe README)."
-                      : `Upload fehlgeschlagen${data.error ? ` (${data.error}).` : "."}`;
-          if (
-            data.hint &&
-            data.error !== "storage_failed" &&
-            !msg.includes(data.hint)
-          ) {
-            msg = `${msg} ${data.hint}`;
-          }
-          setError(msg);
+        const { data, ok } = await readUploadJson<
+          UploadResult & { error?: string; hint?: string }
+        >(res);
+        if (!ok) {
+          setError(
+            uploadErrorMessage(data.error ?? "upload_failed", data.hint),
+          );
           return;
         }
-        setResult({
-          id: data.id,
-          viewerUrl: data.viewerUrl,
-          embedUrl: data.embedUrl,
-          pdfUrl: data.pdfUrl,
-          storage: data.storage,
-        });
-      } catch {
-        setError("Netzwerkfehler beim Upload.");
+        setResult(data);
+      } catch (e) {
+        console.error(e);
+        setError(uploadErrorMessage("network"));
       } finally {
         setUploading(false);
       }
     },
-    [],
+    [useClientUpload],
   );
 
   return (
@@ -190,7 +197,6 @@ export function HomeClient() {
           </p>
         </section>
       )}
-
     </div>
   );
 }
