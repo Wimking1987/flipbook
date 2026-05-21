@@ -2,110 +2,28 @@
 
 import { useCallback, useEffect, useRef, useState } from "react";
 import type { PageFlip } from "page-flip/dist/js/page-flip.browser.js";
-import { MAX_PDF_PAGES } from "@/lib/constants";
+import type { PDFDocumentProxy } from "pdfjs-dist";
+import {
+  iosLikeDevice,
+  loadPdfDocument,
+  renderPdfPageToUrl,
+  renderProfile,
+  viewerErrorMessage,
+  type RenderProfile,
+} from "@/lib/pdf-viewer-render";
 import "page-flip/src/Style/stPageFlip.css";
 
 export type FlipBackground = "wood" | "neutral" | "dark";
 
-/** Volle Klassennamen — damit Styles sicher greifen (kein dynamisches Tailwind-Purging). */
 const SURFACE: Record<FlipBackground, string> = {
   neutral: "flip-surface flip-surface-neutral",
   wood: "flip-surface flip-surface-wood",
   dark: "flip-surface flip-surface-dark",
 };
 
-const MAX_RASTER_WIDTH = 2000;
-const JPEG_QUALITY = 0.92;
 const SPREAD_MIN_WIDTH = 560;
+const MOBILE_CACHE_SIZE = 3;
 
-type RenderProfile = {
-  ios: boolean;
-  maxRasterWidth: number;
-  maxScale: number;
-  maxPages: number;
-  jpegQuality: number;
-  maxCanvasSide: number;
-  maxCanvasPixels: number;
-  maxImageSize: number;
-  /** pdf.js lädt die URL selbst — spart auf iOS den doppelten ArrayBuffer. */
-  useDirectUrlLoading: boolean;
-};
-
-/** iPhone / iPad / „Desktop Safari auf iPadOS“ — dort sind Canvas-/GPU-Limits und Worker-Pfade oft knapper. */
-function iosLikeDevice(): boolean {
-  if (typeof navigator === "undefined") return false;
-  const ua = navigator.userAgent || "";
-  if (/iPad|iPhone|iPod/i.test(ua)) return true;
-  if (navigator.platform === "MacIntel" && navigator.maxTouchPoints > 1) {
-    return true;
-  }
-  return false;
-}
-
-function renderProfile(): RenderProfile {
-  if (iosLikeDevice()) {
-    return {
-      ios: true,
-      maxRasterWidth: 1200,
-      maxScale: 2,
-      maxPages: 80,
-      jpegQuality: 0.82,
-      maxCanvasSide: 2048,
-      maxCanvasPixels: 4_000_000,
-      maxImageSize: 16_777_216,
-      useDirectUrlLoading: true,
-    };
-  }
-  return {
-    ios: false,
-    maxRasterWidth: MAX_RASTER_WIDTH,
-    maxScale: 2.75,
-    maxPages: MAX_PDF_PAGES,
-    jpegQuality: JPEG_QUALITY,
-    maxCanvasSide: 8192,
-    maxCanvasPixels: 16_777_216,
-    maxImageSize: -1,
-    useDirectUrlLoading: false,
-  };
-}
-
-function computeSafeScale(
-  baseWidth: number,
-  baseHeight: number,
-  profile: RenderProfile,
-): number {
-  let scale = Math.min(
-    profile.maxScale,
-    profile.maxRasterWidth / Math.max(baseWidth, 1),
-  );
-  if (!profile.ios) return scale;
-
-  for (let attempt = 0; attempt < 10; attempt++) {
-    const w = Math.floor(baseWidth * scale);
-    const h = Math.floor(baseHeight * scale);
-    if (
-      w >= 1 &&
-      h >= 1 &&
-      w <= profile.maxCanvasSide &&
-      h <= profile.maxCanvasSide &&
-      w * h <= profile.maxCanvasPixels
-    ) {
-      return scale;
-    }
-    scale *= 0.72;
-  }
-  return Math.max(0.25, scale);
-}
-
-function pdfJsPublicRoot(): string {
-  if (typeof window === "undefined") return "/pdfjs/";
-  return `${window.location.origin}/pdfjs/`;
-}
-
-/**
- * Eine PDF-Seite (Pixel iw×ih) in cw×ch einpassen.
- * Doppelseite = Platz für 2× Seitenbreite (Cover nutzt dieselbe Fläche, eine Seite leer).
- */
 function fitPageDimensionsPixels(
   iw: number,
   ih: number,
@@ -145,63 +63,6 @@ function buildPageElements(urls: string[]): HTMLElement[] {
     wrap.appendChild(img);
     return wrap;
   });
-}
-
-async function canvasToObjectUrl(
-  canvas: HTMLCanvasElement,
-  quality = JPEG_QUALITY,
-): Promise<string> {
-  const blob = await new Promise<Blob | null>((resolve) => {
-    try {
-      canvas.toBlob((b) => resolve(b), "image/jpeg", quality);
-    } catch {
-      resolve(null);
-    }
-  });
-  if (blob) return URL.createObjectURL(blob);
-  try {
-    return canvas.toDataURL("image/jpeg", quality);
-  } catch {
-    throw new Error("canvas_export_failed");
-  }
-}
-
-function releaseCanvas(canvas: HTMLCanvasElement) {
-  canvas.width = 0;
-  canvas.height = 0;
-}
-
-async function renderPdfPageToUrl(
-  page: import("pdfjs-dist").PDFPageProxy,
-  profile: RenderProfile,
-): Promise<string> {
-  const base = page.getViewport({ scale: 1 });
-  let scale = computeSafeScale(base.width, base.height, profile);
-
-  for (let attempt = 0; attempt < 5; attempt++) {
-    const viewport = page.getViewport({ scale });
-    const canvas = document.createElement("canvas");
-    const ctx = canvas.getContext("2d", { alpha: false });
-    if (!ctx) throw new Error("no_canvas");
-
-    canvas.width = Math.max(1, Math.floor(viewport.width));
-    canvas.height = Math.max(1, Math.floor(viewport.height));
-    ctx.fillStyle = "#ffffff";
-    ctx.fillRect(0, 0, canvas.width, canvas.height);
-
-    try {
-      await page.render({ canvas, canvasContext: ctx, viewport }).promise;
-      const url = await canvasToObjectUrl(canvas, profile.jpegQuality);
-      releaseCanvas(canvas);
-      return url;
-    } catch {
-      releaseCanvas(canvas);
-      scale *= 0.72;
-      if (scale < 0.2) throw new Error("page_render_failed");
-    }
-  }
-
-  throw new Error("page_render_failed");
 }
 
 function syncBookDomSize(mount: HTMLElement, pf: PageFlip) {
@@ -253,6 +114,137 @@ type Props = {
   embed?: boolean;
 };
 
+function MobilePdfPager({
+  doc,
+  numPages,
+  profile,
+}: {
+  doc: PDFDocumentProxy;
+  numPages: number;
+  profile: RenderProfile;
+}) {
+  const [page, setPage] = useState(1);
+  const [imageUrl, setImageUrl] = useState<string | null>(null);
+  const [pageLoading, setPageLoading] = useState(true);
+  const cacheRef = useRef<Map<number, string>>(new Map());
+  const touchStartX = useRef<number | null>(null);
+
+  useEffect(() => {
+    let cancelled = false;
+    const cache = cacheRef.current;
+
+    void (async () => {
+      setPageLoading(true);
+      const cached = cache.get(page);
+      if (cached) {
+        setImageUrl(cached);
+        setPageLoading(false);
+        return;
+      }
+
+      try {
+        const pdfPage = await doc.getPage(page);
+        const url = await renderPdfPageToUrl(pdfPage, profile);
+        try {
+          pdfPage.cleanup();
+        } catch {
+          /* ignore */
+        }
+        if (cancelled) {
+          if (url.startsWith("blob:")) URL.revokeObjectURL(url);
+          return;
+        }
+        cache.set(page, url);
+        while (cache.size > MOBILE_CACHE_SIZE) {
+          const oldest = cache.keys().next().value;
+          if (oldest === undefined) break;
+          const oldUrl = cache.get(oldest);
+          cache.delete(oldest);
+          if (oldUrl?.startsWith("blob:")) URL.revokeObjectURL(oldUrl);
+        }
+        setImageUrl(url);
+      } catch (e) {
+        console.error(e);
+        if (!cancelled) setImageUrl(null);
+      } finally {
+        if (!cancelled) setPageLoading(false);
+      }
+    })();
+
+    return () => {
+      cancelled = true;
+    };
+  }, [doc, page, profile]);
+
+  useEffect(() => {
+    return () => {
+      for (const url of cacheRef.current.values()) {
+        if (url.startsWith("blob:")) URL.revokeObjectURL(url);
+      }
+      cacheRef.current.clear();
+    };
+  }, []);
+
+  const goPrev = () => setPage((p) => Math.max(1, p - 1));
+  const goNext = () => setPage((p) => Math.min(numPages, p + 1));
+
+  return (
+    <div className="flex h-full min-h-0 w-full flex-col items-center justify-center gap-3 px-2 py-3">
+      <div
+        className="relative flex max-h-full max-w-full flex-1 items-center justify-center"
+        onTouchStart={(e) => {
+          touchStartX.current = e.changedTouches[0]?.clientX ?? null;
+        }}
+        onTouchEnd={(e) => {
+          const start = touchStartX.current;
+          touchStartX.current = null;
+          if (start == null) return;
+          const end = e.changedTouches[0]?.clientX ?? start;
+          const delta = end - start;
+          if (Math.abs(delta) < 40) return;
+          if (delta < 0) goNext();
+          else goPrev();
+        }}
+      >
+        {pageLoading && (
+          <p className="absolute text-sm text-zinc-600 dark:text-zinc-300">
+            Seite {page} …
+          </p>
+        )}
+        {imageUrl && (
+          <img
+            src={imageUrl}
+            alt={`Seite ${page}`}
+            className="max-h-[min(72dvh,780px)] max-w-full object-contain shadow-md"
+            draggable={false}
+          />
+        )}
+      </div>
+      <div className="flex items-center gap-3">
+        <button
+          type="button"
+          onClick={goPrev}
+          disabled={page <= 1 || pageLoading}
+          className="rounded-full bg-zinc-900 px-4 py-2 text-sm font-medium text-white disabled:opacity-40 dark:bg-zinc-100 dark:text-zinc-900"
+        >
+          Zurück
+        </button>
+        <span className="min-w-[5rem] text-center text-sm text-zinc-600 dark:text-zinc-300">
+          {page} / {numPages}
+        </span>
+        <button
+          type="button"
+          onClick={goNext}
+          disabled={page >= numPages || pageLoading}
+          className="rounded-full bg-zinc-900 px-4 py-2 text-sm font-medium text-white disabled:opacity-40 dark:bg-zinc-100 dark:text-zinc-900"
+        >
+          Weiter
+        </button>
+      </div>
+    </div>
+  );
+}
+
 export function FlipbookViewer({
   pdfUrl,
   background = "neutral",
@@ -264,10 +256,14 @@ export function FlipbookViewer({
   const urlsRef = useRef<string[]>([]);
   const dimsRef = useRef<{ iw: number; ih: number }>({ iw: 400, ih: 400 });
   const mountRef = useRef<HTMLDivElement | null>(null);
+  const mobileDocRef = useRef<PDFDocumentProxy | null>(null);
+  const [mobileDoc, setMobileDoc] = useState<PDFDocumentProxy | null>(null);
+  const [mobileNumPages, setMobileNumPages] = useState(0);
   const [status, setStatus] = useState<
     "idle" | "loading" | "ready" | "error"
   >("idle");
   const [message, setMessage] = useState<string>("");
+  const isMobile = iosLikeDevice();
 
   const tearDown = useCallback(() => {
     detachFlipListeners(pageFlipRef.current);
@@ -283,10 +279,13 @@ export function FlipbookViewer({
       if (url.startsWith("blob:")) URL.revokeObjectURL(url);
     }
     urlsRef.current = [];
+    mobileDocRef.current = null;
+    setMobileDoc(null);
+    setMobileNumPages(0);
   }, []);
 
   useEffect(() => {
-    if (!pdfUrl || !hostRef.current) return;
+    if (!pdfUrl) return;
 
     tearDown();
     setStatus("loading");
@@ -310,11 +309,9 @@ export function FlipbookViewer({
       return el;
     };
 
-    if (!ensureMount()) return;
-
     const measure = () => ({
-      w: Math.max(60, host.clientWidth || 400),
-      h: Math.max(60, host.clientHeight || 400),
+      w: Math.max(60, host?.clientWidth || 400),
+      h: Math.max(60, host?.clientHeight || 400),
     });
 
     const buildFlip = async (
@@ -324,14 +321,13 @@ export function FlipbookViewer({
       ih: number,
       profile: RenderProfile,
     ) => {
-      if (cancelled || !urls.length) return;
+      if (cancelled || !urls.length || !hostRef.current) return;
 
       await new Promise<void>((r) => requestAnimationFrame(() => r()));
       if (cancelled) return;
 
       const { w: cw, h: ch } = measure();
-      const useSpread =
-        !iosLikeDevice() && cw >= SPREAD_MIN_WIDTH;
+      const useSpread = cw >= SPREAD_MIN_WIDTH;
       const { pageW, pageH } = fitPageDimensionsPixels(iw, ih, cw, ch, useSpread);
 
       detachFlipListeners(pageFlipRef.current);
@@ -359,9 +355,9 @@ export function FlipbookViewer({
         maxWidth: pageW,
         minHeight: pageH,
         maxHeight: pageH,
-        maxShadowOpacity: profile.ios ? 0.45 : 0.72,
+        maxShadowOpacity: 0.72,
         showCover: true,
-        drawShadow: !profile.ios,
+        drawShadow: true,
         mobileScrollSupport: true,
         usePortrait: !useSpread,
         startPage: 0,
@@ -382,11 +378,9 @@ export function FlipbookViewer({
         });
       };
 
-      const onLayout = () => scheduleSync();
-      pf.on("flip", onLayout);
-      pf.on("changeOrientation", onLayout);
-      pf.on("init", onLayout);
-
+      pf.on("flip", scheduleSync);
+      pf.on("changeOrientation", scheduleSync);
+      pf.on("init", scheduleSync);
       scheduleSync();
       scheduleSync();
 
@@ -398,67 +392,37 @@ export function FlipbookViewer({
     void (async () => {
       const profile = renderProfile();
       try {
+        const pdfjs = await import("pdfjs-dist");
+        const doc = await loadPdfDocument(pdfjs, pdfUrl, profile);
+        if (cancelled) return;
+
+        const numPages = Math.min(doc.numPages, profile.maxPages);
+
+        if (isMobile) {
+          mobileDocRef.current = doc;
+          setMobileDoc(doc);
+          setMobileNumPages(numPages);
+          setStatus("ready");
+          setMessage("");
+          return;
+        }
+
         const { PageFlip: PageFlipCtor } = await import(
           "page-flip/dist/js/page-flip.browser.js"
         );
 
-        const pdfjs = await import("pdfjs-dist");
-        const pdfRoot = pdfJsPublicRoot();
-        pdfjs.GlobalWorkerOptions.workerSrc = `${pdfRoot}pdf.worker.min.mjs`;
-
-        const docInitBase = {
-          wasmUrl: `${pdfRoot}wasm/`,
-          standardFontDataUrl: `${pdfRoot}standard_fonts/`,
-          cMapUrl: `${pdfRoot}cmaps/`,
-          cMapPacked: true,
-          iccUrl: `${pdfRoot}iccs/`,
-          useWasm: true,
-          isImageDecoderSupported: false,
-          maxImageSize: profile.maxImageSize,
-        };
-
-        let doc: import("pdfjs-dist").PDFDocumentProxy;
-        if (profile.useDirectUrlLoading) {
-          const loadingTask = pdfjs.getDocument({
-            url: pdfUrl,
-            disableRange: true,
-            disableStream: true,
-            ...docInitBase,
-          });
-          doc = await loadingTask.promise;
-        } else {
-          const pdfResponse = await fetch(
-            pdfUrl,
-            pdfUrl.startsWith("blob:") ? {} : { cache: "no-store" },
-          );
-          if (!pdfResponse.ok) {
-            throw new Error("pdf_fetch_failed");
-          }
-          const pdfData = await pdfResponse.arrayBuffer();
-          if (cancelled) return;
-          const loadingTask = pdfjs.getDocument({
-            data: pdfData,
-            disableAutoFetch: true,
-            disableStream: true,
-            disableRange: true,
-            ...docInitBase,
-          });
-          doc = await loadingTask.promise;
-        }
-
-        if (cancelled) return;
-
-        const numPages = Math.min(doc.numPages, profile.maxPages);
         const page1 = await doc.getPage(1);
         const base1 = page1.getViewport({ scale: 1 });
-        const scale1 = computeSafeScale(base1.width, base1.height, profile);
+        const scale1 = Math.min(
+          profile.maxScale,
+          profile.maxRasterWidth / Math.max(base1.width, 1),
+        );
         const vp1 = page1.getViewport({ scale: scale1 });
         const iw = Math.max(1, Math.round(vp1.width));
         const ih = Math.max(1, Math.round(vp1.height));
         dimsRef.current = { iw, ih };
 
         const urls: string[] = [];
-
         for (let i = 1; i <= numPages; i++) {
           const page = await doc.getPage(i);
           const jpegUrl = await renderPdfPageToUrl(page, profile);
@@ -477,75 +441,65 @@ export function FlipbookViewer({
           }
         }
 
-        if (cancelled || urls.length === 0) {
-          for (const url of urls) {
-            if (url.startsWith("blob:")) URL.revokeObjectURL(url);
-          }
-          return;
-        }
+        if (cancelled || urls.length === 0) return;
 
         urlsRef.current = urls;
+        if (!ensureMount()) return;
         await buildFlip(PageFlipCtor, urls, iw, ih, profile);
       } catch (e) {
         console.error(e);
         if (!cancelled) {
           setStatus("error");
-          const code =
-            e instanceof Error ? e.message : "pdf_render_failed";
-          setMessage(
-            code === "page_render_failed" && iosLikeDevice()
-              ? "PDF auf diesem Gerät zu gross oder zu speicherintensiv. Auf dem Mac erneut hochladen oder eine kleinere PDF verwenden."
-              : "PDF konnte nicht angezeigt werden.",
-          );
+          setMessage(viewerErrorMessage(e));
         }
       }
     })();
 
     let resizeTimer: ReturnType<typeof setTimeout> | null = null;
-    const ro = new ResizeObserver(() => {
-      if (!urlsRef.current.length) return;
-      if (resizeTimer) clearTimeout(resizeTimer);
-      resizeTimer = setTimeout(() => {
-        resizeTimer = null;
-        void (async () => {
-          const { PageFlip: PageFlipCtor } = await import(
-            "page-flip/dist/js/page-flip.browser.js"
-          );
-          const { iw, ih } = dimsRef.current;
-          await buildFlip(
-            PageFlipCtor,
-            urlsRef.current,
-            iw,
-            ih,
-            renderProfile(),
-          );
-        })();
-      }, 150);
-    });
-    ro.observe(host);
+    const ro =
+      host &&
+      !isMobile
+        ? new ResizeObserver(() => {
+            if (!urlsRef.current.length) return;
+            if (resizeTimer) clearTimeout(resizeTimer);
+            resizeTimer = setTimeout(() => {
+              resizeTimer = null;
+              void (async () => {
+                const { PageFlip: PageFlipCtor } = await import(
+                  "page-flip/dist/js/page-flip.browser.js"
+                );
+                const { iw, ih } = dimsRef.current;
+                await buildFlip(
+                  PageFlipCtor,
+                  urlsRef.current,
+                  iw,
+                  ih,
+                  renderProfile(),
+                );
+              })();
+            }, 150);
+          })
+        : null;
+    if (host && ro) ro.observe(host);
 
     return () => {
       cancelled = true;
       if (resizeTimer) clearTimeout(resizeTimer);
-      ro.disconnect();
+      ro?.disconnect();
       tearDown();
     };
-  }, [pdfUrl, tearDown]);
+  }, [pdfUrl, tearDown, isMobile]);
 
   useEffect(() => {
     const onKey = (e: KeyboardEvent) => {
       if (status !== "ready" || !pageFlipRef.current) return;
       if (e.key === "ArrowRight") {
         e.preventDefault();
-        pageFlipRef.current.flipNext(
-          e.shiftKey ? "bottom" : "top",
-        );
+        pageFlipRef.current.flipNext(e.shiftKey ? "bottom" : "top");
       }
       if (e.key === "ArrowLeft") {
         e.preventDefault();
-        pageFlipRef.current.flipPrev(
-          e.shiftKey ? "bottom" : "top",
-        );
+        pageFlipRef.current.flipPrev(e.shiftKey ? "bottom" : "top");
       }
     };
     window.addEventListener("keydown", onKey);
@@ -571,20 +525,31 @@ export function FlipbookViewer({
         </p>
       )}
       <div className={stageShell} data-flip-bg={background}>
-        <div
-          className={SURFACE[background]}
-          key={background}
-          aria-hidden
-        />
-        <div
-          ref={hostRef}
-          className={`relative z-10 flex min-h-0 min-w-0 flex-1 items-center justify-center ${embed ? "p-0" : "p-2 sm:p-4"}`}
-        />
+        <div className={SURFACE[background]} key={background} aria-hidden />
+        {isMobile && status === "ready" && mobileDoc && mobileNumPages > 0 ? (
+          <div className="relative z-10 flex min-h-0 min-w-0 flex-1 flex-col">
+            <MobilePdfPager
+              doc={mobileDoc}
+              numPages={mobileNumPages}
+              profile={renderProfile()}
+            />
+          </div>
+        ) : (
+          <div
+            ref={hostRef}
+            className={`relative z-10 flex min-h-0 min-w-0 flex-1 items-center justify-center ${embed ? "p-0" : "p-2 sm:p-4"}`}
+          />
+        )}
       </div>
-      {status === "ready" && !embed && (
+      {status === "ready" && !embed && !isMobile && (
         <p className="text-center text-xs text-zinc-500 dark:text-zinc-400">
           Tastatur: ← → zum Blättern · erste PDF-Seite = Cover, danach
           Doppelseiten
+        </p>
+      )}
+      {status === "ready" && !embed && isMobile && (
+        <p className="text-center text-xs text-zinc-500 dark:text-zinc-400">
+          Wischen oder „Zurück / Weiter“ zum Blättern
         </p>
       )}
     </div>
