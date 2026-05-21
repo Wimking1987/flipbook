@@ -1,6 +1,6 @@
 "use client";
 
-import { useCallback, useState } from "react";
+import { useCallback, useRef, useState } from "react";
 import { upload } from "@vercel/blob/client";
 import {
   FlipbookViewer,
@@ -38,12 +38,24 @@ async function validatePdfFile(file: File): Promise<string | null> {
   return null;
 }
 
+function pickPdfFromDrop(dataTransfer: DataTransfer): File | null {
+  const files = dataTransfer.files;
+  if (!files?.length) return null;
+  for (let i = 0; i < files.length; i++) {
+    const file = files[i];
+    if (file && looksLikeUploadedPdf(file)) return file;
+  }
+  return files[0] ?? null;
+}
+
 export function HomeClient({ useClientUpload = false }: Props) {
   const [background, setBackground] = useState<FlipBackground>("neutral");
   const [previewUrl, setPreviewUrl] = useState<string | null>(null);
   const [uploading, setUploading] = useState(false);
+  const [dragOver, setDragOver] = useState(false);
   const [error, setError] = useState<string | null>(null);
   const [result, setResult] = useState<UploadResult | null>(null);
+  const dragDepthRef = useRef(0);
 
   const onFile = useCallback(
     async (file: File | null) => {
@@ -102,6 +114,41 @@ export function HomeClient({ useClientUpload = false }: Props) {
     [useClientUpload],
   );
 
+  const onDragEnter = useCallback((e: React.DragEvent<HTMLLabelElement>) => {
+    e.preventDefault();
+    e.stopPropagation();
+    if (uploading) return;
+    if (![...e.dataTransfer.types].includes("Files")) return;
+    dragDepthRef.current += 1;
+    setDragOver(true);
+  }, [uploading]);
+
+  const onDragLeave = useCallback((e: React.DragEvent<HTMLLabelElement>) => {
+    e.preventDefault();
+    e.stopPropagation();
+    dragDepthRef.current = Math.max(0, dragDepthRef.current - 1);
+    if (dragDepthRef.current === 0) setDragOver(false);
+  }, []);
+
+  const onDragOver = useCallback((e: React.DragEvent<HTMLLabelElement>) => {
+    e.preventDefault();
+    e.stopPropagation();
+    if (uploading) return;
+    e.dataTransfer.dropEffect = "copy";
+  }, [uploading]);
+
+  const onDrop = useCallback(
+    (e: React.DragEvent<HTMLLabelElement>) => {
+      e.preventDefault();
+      e.stopPropagation();
+      dragDepthRef.current = 0;
+      setDragOver(false);
+      if (uploading) return;
+      void onFile(pickPdfFromDrop(e.dataTransfer));
+    },
+    [onFile, uploading],
+  );
+
   return (
     <div className="mx-auto flex w-full max-w-3xl flex-col gap-10 px-4 py-12 sm:px-6">
       <header className="text-center">
@@ -115,7 +162,17 @@ export function HomeClient({ useClientUpload = false }: Props) {
       </header>
 
       <section className="flex flex-col gap-4">
-        <label className="flex cursor-pointer flex-col items-center justify-center rounded-2xl border-2 border-dashed border-zinc-300 bg-white px-6 py-14 transition hover:border-amber-500/60 hover:bg-amber-50/30 dark:border-zinc-600 dark:bg-zinc-900/50 dark:hover:border-amber-400/40 dark:hover:bg-amber-950/20">
+        <label
+          className={`flex cursor-pointer flex-col items-center justify-center rounded-2xl border-2 border-dashed px-6 py-14 transition ${
+            dragOver
+              ? "border-amber-500 bg-amber-50/80 dark:border-amber-400 dark:bg-amber-950/40"
+              : "border-zinc-300 bg-white hover:border-amber-500/60 hover:bg-amber-50/30 dark:border-zinc-600 dark:bg-zinc-900/50 dark:hover:border-amber-400/40 dark:hover:bg-amber-950/20"
+          } ${uploading ? "pointer-events-none opacity-60" : ""}`}
+          onDragEnter={onDragEnter}
+          onDragLeave={onDragLeave}
+          onDragOver={onDragOver}
+          onDrop={onDrop}
+        >
           <input
             type="file"
             accept=".pdf,application/pdf,application/x-pdf,application/octet-stream"
