@@ -2,7 +2,6 @@
 
 import { useCallback, useEffect, useRef, useState } from "react";
 import type { PageFlip } from "page-flip/dist/js/page-flip.browser.js";
-import type { PDFDocumentProxy } from "pdfjs-dist";
 import {
   iosLikeDevice,
   loadPdfDocument,
@@ -22,7 +21,17 @@ const SURFACE: Record<FlipBackground, string> = {
 };
 
 const SPREAD_MIN_WIDTH = 560;
-const MOBILE_CACHE_SIZE = 3;
+
+/** Safari auf iPad/iPhone: eingebetteter PDF-Viewer (JPEG2000/Druck-PDFs). */
+function MobileNativePdfViewer({ pdfUrl }: { pdfUrl: string }) {
+  return (
+    <iframe
+      src={pdfUrl}
+      title="PDF"
+      className="min-h-[min(72dvh,780px)] w-full flex-1 border-0 bg-white"
+    />
+  );
+}
 
 function fitPageDimensionsPixels(
   iw: number,
@@ -114,137 +123,6 @@ type Props = {
   embed?: boolean;
 };
 
-function MobilePdfPager({
-  doc,
-  numPages,
-  profile,
-}: {
-  doc: PDFDocumentProxy;
-  numPages: number;
-  profile: RenderProfile;
-}) {
-  const [page, setPage] = useState(1);
-  const [imageUrl, setImageUrl] = useState<string | null>(null);
-  const [pageLoading, setPageLoading] = useState(true);
-  const cacheRef = useRef<Map<number, string>>(new Map());
-  const touchStartX = useRef<number | null>(null);
-
-  useEffect(() => {
-    let cancelled = false;
-    const cache = cacheRef.current;
-
-    void (async () => {
-      setPageLoading(true);
-      const cached = cache.get(page);
-      if (cached) {
-        setImageUrl(cached);
-        setPageLoading(false);
-        return;
-      }
-
-      try {
-        const pdfPage = await doc.getPage(page);
-        const url = await renderPdfPageToUrl(pdfPage, profile);
-        try {
-          pdfPage.cleanup();
-        } catch {
-          /* ignore */
-        }
-        if (cancelled) {
-          if (url.startsWith("blob:")) URL.revokeObjectURL(url);
-          return;
-        }
-        cache.set(page, url);
-        while (cache.size > MOBILE_CACHE_SIZE) {
-          const oldest = cache.keys().next().value;
-          if (oldest === undefined) break;
-          const oldUrl = cache.get(oldest);
-          cache.delete(oldest);
-          if (oldUrl?.startsWith("blob:")) URL.revokeObjectURL(oldUrl);
-        }
-        setImageUrl(url);
-      } catch (e) {
-        console.error(e);
-        if (!cancelled) setImageUrl(null);
-      } finally {
-        if (!cancelled) setPageLoading(false);
-      }
-    })();
-
-    return () => {
-      cancelled = true;
-    };
-  }, [doc, page, profile]);
-
-  useEffect(() => {
-    return () => {
-      for (const url of cacheRef.current.values()) {
-        if (url.startsWith("blob:")) URL.revokeObjectURL(url);
-      }
-      cacheRef.current.clear();
-    };
-  }, []);
-
-  const goPrev = () => setPage((p) => Math.max(1, p - 1));
-  const goNext = () => setPage((p) => Math.min(numPages, p + 1));
-
-  return (
-    <div className="flex h-full min-h-0 w-full flex-col items-center justify-center gap-3 px-2 py-3">
-      <div
-        className="relative flex max-h-full max-w-full flex-1 items-center justify-center"
-        onTouchStart={(e) => {
-          touchStartX.current = e.changedTouches[0]?.clientX ?? null;
-        }}
-        onTouchEnd={(e) => {
-          const start = touchStartX.current;
-          touchStartX.current = null;
-          if (start == null) return;
-          const end = e.changedTouches[0]?.clientX ?? start;
-          const delta = end - start;
-          if (Math.abs(delta) < 40) return;
-          if (delta < 0) goNext();
-          else goPrev();
-        }}
-      >
-        {pageLoading && (
-          <p className="absolute text-sm text-zinc-600 dark:text-zinc-300">
-            Seite {page} …
-          </p>
-        )}
-        {imageUrl && (
-          <img
-            src={imageUrl}
-            alt={`Seite ${page}`}
-            className="max-h-[min(72dvh,780px)] max-w-full object-contain shadow-md"
-            draggable={false}
-          />
-        )}
-      </div>
-      <div className="flex items-center gap-3">
-        <button
-          type="button"
-          onClick={goPrev}
-          disabled={page <= 1 || pageLoading}
-          className="rounded-full bg-zinc-900 px-4 py-2 text-sm font-medium text-white disabled:opacity-40 dark:bg-zinc-100 dark:text-zinc-900"
-        >
-          Zurück
-        </button>
-        <span className="min-w-[5rem] text-center text-sm text-zinc-600 dark:text-zinc-300">
-          {page} / {numPages}
-        </span>
-        <button
-          type="button"
-          onClick={goNext}
-          disabled={page >= numPages || pageLoading}
-          className="rounded-full bg-zinc-900 px-4 py-2 text-sm font-medium text-white disabled:opacity-40 dark:bg-zinc-100 dark:text-zinc-900"
-        >
-          Weiter
-        </button>
-      </div>
-    </div>
-  );
-}
-
 export function FlipbookViewer({
   pdfUrl,
   background = "neutral",
@@ -256,9 +134,6 @@ export function FlipbookViewer({
   const urlsRef = useRef<string[]>([]);
   const dimsRef = useRef<{ iw: number; ih: number }>({ iw: 400, ih: 400 });
   const mountRef = useRef<HTMLDivElement | null>(null);
-  const mobileDocRef = useRef<PDFDocumentProxy | null>(null);
-  const [mobileDoc, setMobileDoc] = useState<PDFDocumentProxy | null>(null);
-  const [mobileNumPages, setMobileNumPages] = useState(0);
   const [status, setStatus] = useState<
     "idle" | "loading" | "ready" | "error"
   >("idle");
@@ -279,13 +154,16 @@ export function FlipbookViewer({
       if (url.startsWith("blob:")) URL.revokeObjectURL(url);
     }
     urlsRef.current = [];
-    mobileDocRef.current = null;
-    setMobileDoc(null);
-    setMobileNumPages(0);
   }, []);
 
   useEffect(() => {
-    if (!pdfUrl) return;
+    if (!pdfUrl || !isMobile) return;
+    setStatus("ready");
+    setMessage("");
+  }, [pdfUrl, isMobile]);
+
+  useEffect(() => {
+    if (!pdfUrl || isMobile) return;
 
     tearDown();
     setStatus("loading");
@@ -397,15 +275,6 @@ export function FlipbookViewer({
         if (cancelled) return;
 
         const numPages = Math.min(doc.numPages, profile.maxPages);
-
-        if (isMobile) {
-          mobileDocRef.current = doc;
-          setMobileDoc(doc);
-          setMobileNumPages(numPages);
-          setStatus("ready");
-          setMessage("");
-          return;
-        }
 
         const { PageFlip: PageFlipCtor } = await import(
           "page-flip/dist/js/page-flip.browser.js"
@@ -526,13 +395,9 @@ export function FlipbookViewer({
       )}
       <div className={stageShell} data-flip-bg={background}>
         <div className={SURFACE[background]} key={background} aria-hidden />
-        {isMobile && status === "ready" && mobileDoc && mobileNumPages > 0 ? (
+        {isMobile && status === "ready" ? (
           <div className="relative z-10 flex min-h-0 min-w-0 flex-1 flex-col">
-            <MobilePdfPager
-              doc={mobileDoc}
-              numPages={mobileNumPages}
-              profile={renderProfile()}
-            />
+            <MobileNativePdfViewer pdfUrl={pdfUrl} />
           </div>
         ) : (
           <div
@@ -549,7 +414,7 @@ export function FlipbookViewer({
       )}
       {status === "ready" && !embed && isMobile && (
         <p className="text-center text-xs text-zinc-500 dark:text-zinc-400">
-          Wischen oder „Zurück / Weiter“ zum Blättern
+          In der PDF scrollen oder mit zwei Fingern zoomen
         </p>
       )}
     </div>

@@ -157,11 +157,7 @@ export async function loadPdfDocument(
     cMapUrl: `${pdfRoot}cmaps/`,
     cMapPacked: true,
     iccUrl: `${pdfRoot}iccs/`,
-    /**
-     * iOS/iPadOS: JS-Fallback-Decoder (openjpeg_nowasm_fallback.js) ist oft
-     * zuverlässiger als WASM im Worker; relevant für kleine Druck-PDFs mit JPX.
-     */
-    useWasm: !profile.ios,
+    useWasm: true,
     isImageDecoderSupported: false,
     maxImageSize: profile.maxImageSize,
   };
