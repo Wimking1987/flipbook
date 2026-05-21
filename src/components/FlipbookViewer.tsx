@@ -18,18 +18,83 @@ const MAX_RASTER_WIDTH = 2000;
 const JPEG_QUALITY = 0.92;
 const SPREAD_MIN_WIDTH = 560;
 
+type RenderProfile = {
+  ios: boolean;
+  maxRasterWidth: number;
+  maxScale: number;
+  maxPages: number;
+  jpegQuality: number;
+  maxCanvasSide: number;
+  maxCanvasPixels: number;
+  maxImageSize: number;
+  /** pdf.js lädt die URL selbst — spart auf iOS den doppelten ArrayBuffer. */
+  useDirectUrlLoading: boolean;
+};
+
 /** iPhone / iPad / „Desktop Safari auf iPadOS“ — dort sind Canvas-/GPU-Limits und Worker-Pfade oft knapper. */
 function iosLikeDevice(): boolean {
   if (typeof navigator === "undefined") return false;
   const ua = navigator.userAgent || "";
   if (/iPad|iPhone|iPod/i.test(ua)) return true;
-  if (navigator.platform === "MacIntel" && navigator.maxTouchPoints > 1) return true;
+  if (navigator.platform === "MacIntel" && navigator.maxTouchPoints > 1) {
+    return true;
+  }
   return false;
 }
 
-/** Kleinere Raster auf iOS/iPadOS reduzieren Speicherlast beim Rendern (sonst oft kompletter Abbruch → „PDF konnte nicht …“). */
-function effectiveMaxRasterWidth(): number {
-  return iosLikeDevice() ? Math.min(MAX_RASTER_WIDTH, 1536) : MAX_RASTER_WIDTH;
+function renderProfile(): RenderProfile {
+  if (iosLikeDevice()) {
+    return {
+      ios: true,
+      maxRasterWidth: 1200,
+      maxScale: 2,
+      maxPages: 80,
+      jpegQuality: 0.82,
+      maxCanvasSide: 2048,
+      maxCanvasPixels: 4_000_000,
+      maxImageSize: 16_777_216,
+      useDirectUrlLoading: true,
+    };
+  }
+  return {
+    ios: false,
+    maxRasterWidth: MAX_RASTER_WIDTH,
+    maxScale: 2.75,
+    maxPages: MAX_PDF_PAGES,
+    jpegQuality: JPEG_QUALITY,
+    maxCanvasSide: 8192,
+    maxCanvasPixels: 16_777_216,
+    maxImageSize: -1,
+    useDirectUrlLoading: false,
+  };
+}
+
+function computeSafeScale(
+  baseWidth: number,
+  baseHeight: number,
+  profile: RenderProfile,
+): number {
+  let scale = Math.min(
+    profile.maxScale,
+    profile.maxRasterWidth / Math.max(baseWidth, 1),
+  );
+  if (!profile.ios) return scale;
+
+  for (let attempt = 0; attempt < 10; attempt++) {
+    const w = Math.floor(baseWidth * scale);
+    const h = Math.floor(baseHeight * scale);
+    if (
+      w >= 1 &&
+      h >= 1 &&
+      w <= profile.maxCanvasSide &&
+      h <= profile.maxCanvasSide &&
+      w * h <= profile.maxCanvasPixels
+    ) {
+      return scale;
+    }
+    scale *= 0.72;
+  }
+  return Math.max(0.25, scale);
 }
 
 function pdfJsPublicRoot(): string {
@@ -82,20 +147,61 @@ function buildPageElements(urls: string[]): HTMLElement[] {
   });
 }
 
-async function canvasToObjectUrl(canvas: HTMLCanvasElement): Promise<string> {
+async function canvasToObjectUrl(
+  canvas: HTMLCanvasElement,
+  quality = JPEG_QUALITY,
+): Promise<string> {
   const blob = await new Promise<Blob | null>((resolve) => {
     try {
-      canvas.toBlob((b) => resolve(b), "image/jpeg", JPEG_QUALITY);
+      canvas.toBlob((b) => resolve(b), "image/jpeg", quality);
     } catch {
       resolve(null);
     }
   });
   if (blob) return URL.createObjectURL(blob);
   try {
-    return canvas.toDataURL("image/jpeg", JPEG_QUALITY);
+    return canvas.toDataURL("image/jpeg", quality);
   } catch {
     throw new Error("canvas_export_failed");
   }
+}
+
+function releaseCanvas(canvas: HTMLCanvasElement) {
+  canvas.width = 0;
+  canvas.height = 0;
+}
+
+async function renderPdfPageToUrl(
+  page: import("pdfjs-dist").PDFPageProxy,
+  profile: RenderProfile,
+): Promise<string> {
+  const base = page.getViewport({ scale: 1 });
+  let scale = computeSafeScale(base.width, base.height, profile);
+
+  for (let attempt = 0; attempt < 5; attempt++) {
+    const viewport = page.getViewport({ scale });
+    const canvas = document.createElement("canvas");
+    const ctx = canvas.getContext("2d", { alpha: false });
+    if (!ctx) throw new Error("no_canvas");
+
+    canvas.width = Math.max(1, Math.floor(viewport.width));
+    canvas.height = Math.max(1, Math.floor(viewport.height));
+    ctx.fillStyle = "#ffffff";
+    ctx.fillRect(0, 0, canvas.width, canvas.height);
+
+    try {
+      await page.render({ canvas, canvasContext: ctx, viewport }).promise;
+      const url = await canvasToObjectUrl(canvas, profile.jpegQuality);
+      releaseCanvas(canvas);
+      return url;
+    } catch {
+      releaseCanvas(canvas);
+      scale *= 0.72;
+      if (scale < 0.2) throw new Error("page_render_failed");
+    }
+  }
+
+  throw new Error("page_render_failed");
 }
 
 function syncBookDomSize(mount: HTMLElement, pf: PageFlip) {
@@ -216,6 +322,7 @@ export function FlipbookViewer({
       urls: string[],
       iw: number,
       ih: number,
+      profile: RenderProfile,
     ) => {
       if (cancelled || !urls.length) return;
 
@@ -223,7 +330,8 @@ export function FlipbookViewer({
       if (cancelled) return;
 
       const { w: cw, h: ch } = measure();
-      const useSpread = cw >= SPREAD_MIN_WIDTH;
+      const useSpread =
+        !iosLikeDevice() && cw >= SPREAD_MIN_WIDTH;
       const { pageW, pageH } = fitPageDimensionsPixels(iw, ih, cw, ch, useSpread);
 
       detachFlipListeners(pageFlipRef.current);
@@ -251,9 +359,9 @@ export function FlipbookViewer({
         maxWidth: pageW,
         minHeight: pageH,
         maxHeight: pageH,
-        maxShadowOpacity: 0.72,
+        maxShadowOpacity: profile.ios ? 0.45 : 0.72,
         showCover: true,
-        drawShadow: true,
+        drawShadow: !profile.ios,
         mobileScrollSupport: true,
         usePortrait: !useSpread,
         startPage: 0,
@@ -288,6 +396,7 @@ export function FlipbookViewer({
     };
 
     void (async () => {
+      const profile = renderProfile();
       try {
         const { PageFlip: PageFlipCtor } = await import(
           "page-flip/dist/js/page-flip.browser.js"
@@ -297,44 +406,52 @@ export function FlipbookViewer({
         const pdfRoot = pdfJsPublicRoot();
         pdfjs.GlobalWorkerOptions.workerSrc = `${pdfRoot}pdf.worker.min.mjs`;
 
-        const pdfResponse = await fetch(
-          pdfUrl,
-          pdfUrl.startsWith("blob:") ? {} : { cache: "no-store" },
-        );
-        if (!pdfResponse.ok) {
-          throw new Error("pdf_fetch_failed");
-        }
-        const pdfData = await pdfResponse.arrayBuffer();
-        if (cancelled) return;
-
-        const loadingTask = pdfjs.getDocument({
-          data: pdfData,
-          disableAutoFetch: true,
-          disableStream: true,
-          disableRange: true,
+        const docInitBase = {
           wasmUrl: `${pdfRoot}wasm/`,
           standardFontDataUrl: `${pdfRoot}standard_fonts/`,
           cMapUrl: `${pdfRoot}cmaps/`,
           cMapPacked: true,
-          /** Farbprofile für CMYK/o. ä. — ohne URL können manche Seiten leer bleiben. */
           iccUrl: `${pdfRoot}iccs/`,
           useWasm: true,
-          /**
-           * Chromiums ImageDecoder kann bei JPEG mit ICC fehlschlagen (leere Flächen);
-           * klassischer Worker-Decoder ist stabiler. Siehe pdf.js DocumentInitParameters.
-           */
           isImageDecoderSupported: false,
-          /** Kein Cap — große eingebettete Bilder würden sonst ungezeichnet bleiben. */
-          maxImageSize: -1,
-        });
-        const doc = await loadingTask.promise;
-        const numPages = Math.min(doc.numPages, MAX_PDF_PAGES);
+          maxImageSize: profile.maxImageSize,
+        };
+
+        let doc: import("pdfjs-dist").PDFDocumentProxy;
+        if (profile.useDirectUrlLoading) {
+          const loadingTask = pdfjs.getDocument({
+            url: pdfUrl,
+            disableRange: true,
+            disableStream: true,
+            ...docInitBase,
+          });
+          doc = await loadingTask.promise;
+        } else {
+          const pdfResponse = await fetch(
+            pdfUrl,
+            pdfUrl.startsWith("blob:") ? {} : { cache: "no-store" },
+          );
+          if (!pdfResponse.ok) {
+            throw new Error("pdf_fetch_failed");
+          }
+          const pdfData = await pdfResponse.arrayBuffer();
+          if (cancelled) return;
+          const loadingTask = pdfjs.getDocument({
+            data: pdfData,
+            disableAutoFetch: true,
+            disableStream: true,
+            disableRange: true,
+            ...docInitBase,
+          });
+          doc = await loadingTask.promise;
+        }
+
         if (cancelled) return;
 
-        const rasterCap = effectiveMaxRasterWidth();
+        const numPages = Math.min(doc.numPages, profile.maxPages);
         const page1 = await doc.getPage(1);
         const base1 = page1.getViewport({ scale: 1 });
-        const scale1 = Math.min(2.75, rasterCap / Math.max(base1.width, 1));
+        const scale1 = computeSafeScale(base1.width, base1.height, profile);
         const vp1 = page1.getViewport({ scale: scale1 });
         const iw = Math.max(1, Math.round(vp1.width));
         const ih = Math.max(1, Math.round(vp1.height));
@@ -344,19 +461,7 @@ export function FlipbookViewer({
 
         for (let i = 1; i <= numPages; i++) {
           const page = await doc.getPage(i);
-          const base = page.getViewport({ scale: 1 });
-          const scale = Math.min(2.75, rasterCap / Math.max(base.width, 1));
-          const viewport = page.getViewport({ scale });
-          const canvas = document.createElement("canvas");
-          const ctx = canvas.getContext("2d", { alpha: false });
-          if (!ctx) throw new Error("no_canvas");
-          canvas.width = Math.max(1, Math.floor(viewport.width));
-          canvas.height = Math.max(1, Math.floor(viewport.height));
-          ctx.fillStyle = "#ffffff";
-          ctx.fillRect(0, 0, canvas.width, canvas.height);
-          const task = page.render({ canvas, canvasContext: ctx, viewport });
-          await task.promise;
-          const jpegUrl = await canvasToObjectUrl(canvas);
+          const jpegUrl = await renderPdfPageToUrl(page, profile);
           try {
             page.cleanup();
           } catch {
@@ -380,12 +485,18 @@ export function FlipbookViewer({
         }
 
         urlsRef.current = urls;
-        await buildFlip(PageFlipCtor, urls, iw, ih);
+        await buildFlip(PageFlipCtor, urls, iw, ih, profile);
       } catch (e) {
         console.error(e);
         if (!cancelled) {
           setStatus("error");
-          setMessage("PDF konnte nicht angezeigt werden.");
+          const code =
+            e instanceof Error ? e.message : "pdf_render_failed";
+          setMessage(
+            code === "page_render_failed" && iosLikeDevice()
+              ? "PDF auf diesem Gerät zu gross oder zu speicherintensiv. Auf dem Mac erneut hochladen oder eine kleinere PDF verwenden."
+              : "PDF konnte nicht angezeigt werden.",
+          );
         }
       }
     })();
@@ -401,7 +512,13 @@ export function FlipbookViewer({
             "page-flip/dist/js/page-flip.browser.js"
           );
           const { iw, ih } = dimsRef.current;
-          await buildFlip(PageFlipCtor, urlsRef.current, iw, ih);
+          await buildFlip(
+            PageFlipCtor,
+            urlsRef.current,
+            iw,
+            ih,
+            renderProfile(),
+          );
         })();
       }, 150);
     });
