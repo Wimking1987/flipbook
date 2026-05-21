@@ -6,6 +6,7 @@ import {
   type FlipBackground,
 } from "@/components/FlipbookViewer";
 import { EmbedCodeBlock } from "@/components/EmbedCodeBlock";
+import { looksLikeUploadedPdf } from "@/lib/accept-upload-pdf";
 
 type UploadResult = {
   id: string;
@@ -110,7 +111,7 @@ export function HomeClient() {
         <label className="flex cursor-pointer flex-col items-center justify-center rounded-2xl border-2 border-dashed border-zinc-300 bg-white px-6 py-14 transition hover:border-amber-500/60 hover:bg-amber-50/30 dark:border-zinc-600 dark:bg-zinc-900/50 dark:hover:border-amber-400/40 dark:hover:bg-amber-950/20">
           <input
             type="file"
-            accept="application/pdf,.pdf"
+            accept=".pdf,application/pdf,application/x-pdf,application/octet-stream"
             className="sr-only"
             disabled={uploading}
             onChange={(e) => void onFile(e.target.files?.[0] ?? null)}

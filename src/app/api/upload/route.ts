@@ -1,6 +1,7 @@
 import { NextResponse } from "next/server";
 import { nanoid } from "nanoid";
 import { blobStorageEnabled, savePdfBytes } from "@/lib/pdf-storage";
+import { looksLikeUploadedPdf } from "@/lib/accept-upload-pdf";
 import { validatePdfBuffer } from "@/lib/validate-pdf";
 
 const ID_RE = /^[a-zA-Z0-9_-]{12,24}$/;
@@ -19,7 +20,7 @@ export async function POST(request: Request) {
   if (!(file instanceof File)) {
     return NextResponse.json({ error: "missing_file" }, { status: 400 });
   }
-  if (file.type && file.type !== "application/pdf") {
+  if (!looksLikeUploadedPdf(file)) {
     return NextResponse.json({ error: "invalid_type" }, { status: 400 });
   }
 
