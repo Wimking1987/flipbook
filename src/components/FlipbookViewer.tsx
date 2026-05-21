@@ -18,6 +18,25 @@ const MAX_RASTER_WIDTH = 2000;
 const JPEG_QUALITY = 0.92;
 const SPREAD_MIN_WIDTH = 560;
 
+/** iPhone / iPad / „Desktop Safari auf iPadOS“ — dort sind Canvas-/GPU-Limits und Worker-Pfade oft knapper. */
+function iosLikeDevice(): boolean {
+  if (typeof navigator === "undefined") return false;
+  const ua = navigator.userAgent || "";
+  if (/iPad|iPhone|iPod/i.test(ua)) return true;
+  if (navigator.platform === "MacIntel" && navigator.maxTouchPoints > 1) return true;
+  return false;
+}
+
+/** Kleinere Raster auf iOS/iPadOS reduzieren Speicherlast beim Rendern (sonst oft kompletter Abbruch → „PDF konnte nicht …“). */
+function effectiveMaxRasterWidth(): number {
+  return iosLikeDevice() ? Math.min(MAX_RASTER_WIDTH, 1536) : MAX_RASTER_WIDTH;
+}
+
+function pdfJsPublicRoot(): string {
+  if (typeof window === "undefined") return "/pdfjs/";
+  return `${window.location.origin}/pdfjs/`;
+}
+
 /**
  * Eine PDF-Seite (Pixel iw×ih) in cw×ch einpassen.
  * Doppelseite = Platz für 2× Seitenbreite (Cover nutzt dieselbe Fläche, eine Seite leer).
@@ -65,10 +84,18 @@ function buildPageElements(urls: string[]): HTMLElement[] {
 
 async function canvasToObjectUrl(canvas: HTMLCanvasElement): Promise<string> {
   const blob = await new Promise<Blob | null>((resolve) => {
-    canvas.toBlob((b) => resolve(b), "image/jpeg", JPEG_QUALITY);
+    try {
+      canvas.toBlob((b) => resolve(b), "image/jpeg", JPEG_QUALITY);
+    } catch {
+      resolve(null);
+    }
   });
   if (blob) return URL.createObjectURL(blob);
-  return canvas.toDataURL("image/jpeg", JPEG_QUALITY);
+  try {
+    return canvas.toDataURL("image/jpeg", JPEG_QUALITY);
+  } catch {
+    throw new Error("canvas_export_failed");
+  }
 }
 
 function syncBookDomSize(mount: HTMLElement, pf: PageFlip) {
@@ -267,9 +294,13 @@ export function FlipbookViewer({
         );
 
         const pdfjs = await import("pdfjs-dist");
-        pdfjs.GlobalWorkerOptions.workerSrc = "/pdfjs/pdf.worker.min.mjs";
+        const pdfRoot = pdfJsPublicRoot();
+        pdfjs.GlobalWorkerOptions.workerSrc = `${pdfRoot}pdf.worker.min.mjs`;
 
-        const pdfResponse = await fetch(pdfUrl, { cache: "no-store" });
+        const pdfResponse = await fetch(
+          pdfUrl,
+          pdfUrl.startsWith("blob:") ? {} : { cache: "no-store" },
+        );
         if (!pdfResponse.ok) {
           throw new Error("pdf_fetch_failed");
         }
@@ -281,12 +312,12 @@ export function FlipbookViewer({
           disableAutoFetch: true,
           disableStream: true,
           disableRange: true,
-          wasmUrl: "/pdfjs/wasm/",
-          standardFontDataUrl: "/pdfjs/standard_fonts/",
-          cMapUrl: "/pdfjs/cmaps/",
+          wasmUrl: `${pdfRoot}wasm/`,
+          standardFontDataUrl: `${pdfRoot}standard_fonts/`,
+          cMapUrl: `${pdfRoot}cmaps/`,
           cMapPacked: true,
           /** Farbprofile für CMYK/o. ä. — ohne URL können manche Seiten leer bleiben. */
-          iccUrl: "/pdfjs/iccs/",
+          iccUrl: `${pdfRoot}iccs/`,
           useWasm: true,
           /**
            * Chromiums ImageDecoder kann bei JPEG mit ICC fehlschlagen (leere Flächen);
@@ -300,9 +331,10 @@ export function FlipbookViewer({
         const numPages = Math.min(doc.numPages, MAX_PDF_PAGES);
         if (cancelled) return;
 
+        const rasterCap = effectiveMaxRasterWidth();
         const page1 = await doc.getPage(1);
         const base1 = page1.getViewport({ scale: 1 });
-        const scale1 = Math.min(2.75, MAX_RASTER_WIDTH / Math.max(base1.width, 1));
+        const scale1 = Math.min(2.75, rasterCap / Math.max(base1.width, 1));
         const vp1 = page1.getViewport({ scale: scale1 });
         const iw = Math.max(1, Math.round(vp1.width));
         const ih = Math.max(1, Math.round(vp1.height));
@@ -313,7 +345,7 @@ export function FlipbookViewer({
         for (let i = 1; i <= numPages; i++) {
           const page = await doc.getPage(i);
           const base = page.getViewport({ scale: 1 });
-          const scale = Math.min(2.75, MAX_RASTER_WIDTH / Math.max(base.width, 1));
+          const scale = Math.min(2.75, rasterCap / Math.max(base.width, 1));
           const viewport = page.getViewport({ scale });
           const canvas = document.createElement("canvas");
           const ctx = canvas.getContext("2d", { alpha: false });
