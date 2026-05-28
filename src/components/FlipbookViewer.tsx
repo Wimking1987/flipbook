@@ -10,6 +10,7 @@ import {
   viewerErrorMessage,
   type RenderProfile,
 } from "@/lib/pdf-viewer-render";
+import type { FlipManifest } from "@/lib/upload-shared";
 import "page-flip/src/Style/stPageFlip.css";
 
 export type FlipBackground = "wood" | "neutral" | "dark";
@@ -68,6 +69,7 @@ function buildPageElements(urls: string[]): HTMLElement[] {
     img.alt = "";
     img.draggable = false;
     img.decoding = "async";
+    img.loading = "eager";
     img.className = "flip-page-img";
     wrap.appendChild(img);
     return wrap;
@@ -98,8 +100,13 @@ function detachFlipListeners(pf: PageFlip | null) {
   }
 }
 
-async function decodePageImages(pages: HTMLElement[]): Promise<void> {
-  for (const p of pages) {
+/** Wait for the first `count` images to decode so the first paint is clean. */
+async function decodeFirstImages(
+  pages: HTMLElement[],
+  count: number,
+): Promise<void> {
+  const subset = pages.slice(0, Math.max(0, count));
+  for (const p of subset) {
     const img = p.querySelector("img");
     if (!img) continue;
     if (!img.complete) {
@@ -116,8 +123,24 @@ async function decodePageImages(pages: HTMLElement[]): Promise<void> {
   }
 }
 
+async function fetchManifest(docId: string): Promise<FlipManifest | null> {
+  try {
+    const res = await fetch(`/api/flip/${docId}`, { cache: "no-store" });
+    if (!res.ok) return null;
+    const data = (await res.json()) as FlipManifest;
+    if (!data || !Array.isArray(data.images) || data.images.length === 0) {
+      return null;
+    }
+    return data;
+  } catch {
+    return null;
+  }
+}
+
 type Props = {
   pdfUrl: string;
+  /** When set, the viewer first tries pre-rendered page images (fast path). */
+  docId?: string;
   background?: FlipBackground;
   className?: string;
   embed?: boolean;
@@ -125,6 +148,7 @@ type Props = {
 
 export function FlipbookViewer({
   pdfUrl,
+  docId,
   background = "neutral",
   className = "",
   embed = false,
@@ -138,6 +162,8 @@ export function FlipbookViewer({
     "idle" | "loading" | "ready" | "error"
   >("idle");
   const [message, setMessage] = useState<string>("");
+  /** "native" = Safari-PDF-iframe fallback (mobile, no pre-rendered images). */
+  const [renderMode, setRenderMode] = useState<"flip" | "native">("flip");
   const isMobile = iosLikeDevice();
 
   const tearDown = useCallback(() => {
@@ -157,19 +183,12 @@ export function FlipbookViewer({
   }, []);
 
   useEffect(() => {
-    if (!pdfUrl || !isMobile) return;
-    setStatus("ready");
-    setMessage("");
-  }, [pdfUrl, isMobile]);
-
-  useEffect(() => {
-    if (!pdfUrl || isMobile) return;
+    if (!pdfUrl) return;
 
     tearDown();
     setStatus("loading");
     setMessage("PDF wird geladen …");
 
-    const host = hostRef.current;
     let cancelled = false;
 
     const ensureMount = (): HTMLDivElement | null => {
@@ -188,8 +207,8 @@ export function FlipbookViewer({
     };
 
     const measure = () => ({
-      w: Math.max(60, host?.clientWidth || 400),
-      h: Math.max(60, host?.clientHeight || 400),
+      w: Math.max(60, hostRef.current?.clientWidth || 400),
+      h: Math.max(60, hostRef.current?.clientHeight || 400),
     });
 
     const buildFlip = async (
@@ -197,7 +216,7 @@ export function FlipbookViewer({
       urls: string[],
       iw: number,
       ih: number,
-      profile: RenderProfile,
+      decodeCount: number,
     ) => {
       if (cancelled || !urls.length || !hostRef.current) return;
 
@@ -222,7 +241,7 @@ export function FlipbookViewer({
       if (!mount) return;
 
       const pages = buildPageElements(urls);
-      await decodePageImages(pages).catch(() => undefined);
+      await decodeFirstImages(pages, decodeCount).catch(() => undefined);
 
       const pf = new PageFlipCtor(mount, {
         width: pageW,
@@ -268,6 +287,46 @@ export function FlipbookViewer({
     };
 
     void (async () => {
+      // Fast path: pre-rendered page images (works on desktop and mobile).
+      if (docId) {
+        const manifest = await fetchManifest(docId);
+        if (cancelled) return;
+        if (manifest) {
+          try {
+            const { PageFlip: PageFlipCtor } = await import(
+              "page-flip/dist/js/page-flip.browser.js"
+            );
+            urlsRef.current = manifest.images;
+            dimsRef.current = { iw: manifest.width, ih: manifest.height };
+            setRenderMode("flip");
+            await new Promise<void>((r) =>
+              requestAnimationFrame(() => r()),
+            );
+            await buildFlip(
+              PageFlipCtor,
+              manifest.images,
+              manifest.width,
+              manifest.height,
+              1,
+            );
+            return;
+          } catch (e) {
+            console.error(e);
+            // fall through to live rendering
+          }
+        }
+      }
+
+      // Mobile fallback without pre-rendered images: native Safari PDF viewer.
+      if (isMobile) {
+        setRenderMode("native");
+        setStatus("ready");
+        setMessage("");
+        return;
+      }
+
+      // Desktop fallback: live pdf.js rendering, progressively shown.
+      setRenderMode("flip");
       const profile = renderProfile();
       try {
         const pdfjs = await import("pdfjs-dist");
@@ -275,7 +334,6 @@ export function FlipbookViewer({
         if (cancelled) return;
 
         const numPages = Math.min(doc.numPages, profile.maxPages);
-
         const { PageFlip: PageFlipCtor } = await import(
           "page-flip/dist/js/page-flip.browser.js"
         );
@@ -292,29 +350,56 @@ export function FlipbookViewer({
         dimsRef.current = { iw, ih };
 
         const urls: string[] = [];
-        for (let i = 1; i <= numPages; i++) {
+        // Render an initial batch so the book appears quickly…
+        const initial = Math.min(2, numPages);
+        for (let i = 1; i <= initial; i++) {
           const page = await doc.getPage(i);
-          const jpegUrl = await renderPdfPageToUrl(page, profile);
+          urls.push(await renderPdfPageToUrl(page, profile));
           try {
             page.cleanup();
           } catch {
             /* ignore */
           }
-          urls.push(jpegUrl);
           setMessage(`Seiten rendern … ${i}/${numPages}`);
           if (cancelled) {
-            for (const url of urls) {
-              if (url.startsWith("blob:")) URL.revokeObjectURL(url);
-            }
+            urls.forEach((u) => u.startsWith("blob:") && URL.revokeObjectURL(u));
             return;
           }
         }
 
         if (cancelled || urls.length === 0) return;
-
         urlsRef.current = urls;
         if (!ensureMount()) return;
-        await buildFlip(PageFlipCtor, urls, iw, ih, profile);
+        await buildFlip(PageFlipCtor, urls, iw, ih, initial);
+
+        // …then render the remaining pages in the background and update.
+        if (numPages > initial && !cancelled) {
+          for (let i = initial + 1; i <= numPages; i++) {
+            const page = await doc.getPage(i);
+            urls.push(await renderPdfPageToUrl(page, profile));
+            try {
+              page.cleanup();
+            } catch {
+              /* ignore */
+            }
+            if (cancelled) return;
+          }
+          if (cancelled) return;
+          urlsRef.current = urls;
+          try {
+            const pf = pageFlipRef.current as
+              | (PageFlip & {
+                  updateFromHtml?: (items: HTMLElement[]) => void;
+                })
+              | null;
+            pf?.updateFromHtml?.(buildPageElements(urls));
+            if (mountRef.current && pf) {
+              syncBookDomSize(mountRef.current, pf);
+            }
+          } catch {
+            /* ignore */
+          }
+        }
       } catch (e) {
         console.error(e);
         if (!cancelled) {
@@ -325,39 +410,35 @@ export function FlipbookViewer({
     })();
 
     let resizeTimer: ReturnType<typeof setTimeout> | null = null;
-    const ro =
-      host &&
-      !isMobile
-        ? new ResizeObserver(() => {
-            if (!urlsRef.current.length) return;
-            if (resizeTimer) clearTimeout(resizeTimer);
-            resizeTimer = setTimeout(() => {
-              resizeTimer = null;
-              void (async () => {
-                const { PageFlip: PageFlipCtor } = await import(
-                  "page-flip/dist/js/page-flip.browser.js"
-                );
-                const { iw, ih } = dimsRef.current;
-                await buildFlip(
-                  PageFlipCtor,
-                  urlsRef.current,
-                  iw,
-                  ih,
-                  renderProfile(),
-                );
-              })();
-            }, 150);
-          })
-        : null;
-    if (host && ro) ro.observe(host);
+    const ro = new ResizeObserver(() => {
+      if (!urlsRef.current.length || isMobile) return;
+      if (resizeTimer) clearTimeout(resizeTimer);
+      resizeTimer = setTimeout(() => {
+        resizeTimer = null;
+        void (async () => {
+          const { PageFlip: PageFlipCtor } = await import(
+            "page-flip/dist/js/page-flip.browser.js"
+          );
+          const { iw, ih } = dimsRef.current;
+          await buildFlip(
+            PageFlipCtor,
+            urlsRef.current,
+            iw,
+            ih,
+            1,
+          );
+        })();
+      }, 150);
+    });
+    if (hostRef.current) ro.observe(hostRef.current);
 
     return () => {
       cancelled = true;
       if (resizeTimer) clearTimeout(resizeTimer);
-      ro?.disconnect();
+      ro.disconnect();
       tearDown();
     };
-  }, [pdfUrl, tearDown, isMobile]);
+  }, [pdfUrl, docId, tearDown, isMobile]);
 
   useEffect(() => {
     const onKey = (e: KeyboardEvent) => {
@@ -379,6 +460,8 @@ export function FlipbookViewer({
     ? "flip-viewer-stage relative flex min-h-0 w-full flex-1 basis-0 flex-col overflow-hidden rounded-none"
     : "flip-viewer-stage relative flex h-[min(85dvh,920px)] w-full flex-col overflow-hidden rounded-lg";
 
+  const showNative = renderMode === "native" && status === "ready";
+
   return (
     <div
       className={`flex flex-col ${embed ? "min-h-0 flex-1 gap-0" : "gap-3"} ${embed ? "" : "rounded-2xl border border-zinc-300/70 bg-transparent p-3 dark:border-zinc-600 dark:bg-transparent"} ${className}`}
@@ -395,24 +478,25 @@ export function FlipbookViewer({
       )}
       <div className={stageShell} data-flip-bg={background}>
         <div className={SURFACE[background]} key={background} aria-hidden />
-        {isMobile && status === "ready" ? (
-          <div className="relative z-10 flex min-h-0 min-w-0 flex-1 flex-col">
+        <div
+          ref={hostRef}
+          className={`relative z-10 flex min-h-0 min-w-0 flex-1 items-center justify-center ${
+            showNative ? "hidden" : ""
+          } ${embed ? "p-0" : "p-2 sm:p-4"}`}
+        />
+        {showNative && (
+          <div className="absolute inset-0 z-20 flex min-h-0 min-w-0 flex-1 flex-col">
             <MobileNativePdfViewer pdfUrl={pdfUrl} />
           </div>
-        ) : (
-          <div
-            ref={hostRef}
-            className={`relative z-10 flex min-h-0 min-w-0 flex-1 items-center justify-center ${embed ? "p-0" : "p-2 sm:p-4"}`}
-          />
         )}
       </div>
-      {status === "ready" && !embed && !isMobile && (
+      {status === "ready" && !embed && renderMode === "flip" && (
         <p className="text-center text-xs text-zinc-500 dark:text-zinc-400">
           Tastatur: ← → zum Blättern · erste PDF-Seite = Cover, danach
           Doppelseiten
         </p>
       )}
-      {status === "ready" && !embed && isMobile && (
+      {status === "ready" && !embed && renderMode === "native" && (
         <p className="text-center text-xs text-zinc-500 dark:text-zinc-400">
           In der PDF scrollen oder mit zwei Fingern zoomen
         </p>

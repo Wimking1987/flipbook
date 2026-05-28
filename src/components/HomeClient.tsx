@@ -12,12 +12,84 @@ import { MAX_PDF_BYTES } from "@/lib/constants";
 import {
   buildUploadResult,
   generateUploadId,
+  manifestBlobPathname,
+  pageImageBlobPathname,
   readUploadJson,
   uploadErrorMessage,
   uploadBlobPathname,
+  FLIP_MANIFEST_VERSION,
+  type FlipManifest,
   type UploadResult,
 } from "@/lib/upload-shared";
+import {
+  loadPdfDocumentFromData,
+  publishProfile,
+  renderPdfPageToBlob,
+} from "@/lib/pdf-viewer-render";
 import { isPdfMagic } from "@/lib/validate-pdf";
+
+/**
+ * Pre-render page images once at upload time and store them in Blob, so the
+ * shared viewer/embed can load ready-made images instead of rasterizing the
+ * PDF on every visit. Non-fatal: on failure the viewer falls back to pdf.js.
+ */
+async function prerenderAndUploadPages(
+  id: string,
+  file: File,
+  onProgress: (done: number, total: number) => void,
+): Promise<void> {
+  const pdfjs = await import("pdfjs-dist");
+  const profile = publishProfile();
+  const data = await file.arrayBuffer();
+  const doc = await loadPdfDocumentFromData(pdfjs, data, profile);
+  const numPages = Math.min(doc.numPages, profile.maxPages);
+
+  const images: string[] = [];
+  let width = 0;
+  let height = 0;
+
+  for (let i = 1; i <= numPages; i++) {
+    const page = await doc.getPage(i);
+    const { blob, width: w, height: h } = await renderPdfPageToBlob(
+      page,
+      profile,
+    );
+    try {
+      page.cleanup();
+    } catch {
+      /* ignore */
+    }
+    if (i === 1) {
+      width = w;
+      height = h;
+    }
+    const res = await upload(pageImageBlobPathname(id, i), blob, {
+      access: "public",
+      handleUploadUrl: "/api/upload/client",
+      contentType: "image/jpeg",
+    });
+    images.push(res.url);
+    onProgress(i, numPages);
+  }
+
+  if (images.length === 0) return;
+
+  const manifest: FlipManifest = {
+    v: FLIP_MANIFEST_VERSION,
+    pages: images.length,
+    width,
+    height,
+    images,
+  };
+  const manifestBlob = new Blob([JSON.stringify(manifest)], {
+    type: "application/json",
+  });
+  await upload(manifestBlobPathname(id), manifestBlob, {
+    access: "public",
+    handleUploadUrl: "/api/upload/client",
+    contentType: "application/json",
+  });
+}
 
 const BACKGROUNDS: { id: FlipBackground; label: string }[] = [
   { id: "neutral", label: "Neutral" },
@@ -52,6 +124,7 @@ export function HomeClient({ useClientUpload = false }: Props) {
   const [background, setBackground] = useState<FlipBackground>("neutral");
   const [previewUrl, setPreviewUrl] = useState<string | null>(null);
   const [uploading, setUploading] = useState(false);
+  const [progress, setProgress] = useState<string>("");
   const [dragOver, setDragOver] = useState(false);
   const [error, setError] = useState<string | null>(null);
   const [result, setResult] = useState<UploadResult | null>(null);
@@ -76,15 +149,27 @@ export function HomeClient({ useClientUpload = false }: Props) {
       });
 
       setUploading(true);
+      setProgress("");
       try {
         if (useClientUpload) {
           const id = generateUploadId();
+          setProgress("PDF wird hochgeladen …");
           await upload(uploadBlobPathname(id), file, {
             access: "public",
             handleUploadUrl: "/api/upload/client",
             contentType: file.type || "application/pdf",
             multipart: file.size > 4 * 1024 * 1024,
           });
+
+          try {
+            await prerenderAndUploadPages(id, file, (done, total) => {
+              setProgress(`Vorschau wird vorbereitet … ${done}/${total}`);
+            });
+          } catch (prerenderError) {
+            // Non-fatal: viewer falls back to live pdf.js rendering.
+            console.error("prerender_failed", prerenderError);
+          }
+
           setResult(
             buildUploadResult(id, window.location.origin, "vercel_blob"),
           );
@@ -109,6 +194,7 @@ export function HomeClient({ useClientUpload = false }: Props) {
         setError(uploadErrorMessage("network"));
       } finally {
         setUploading(false);
+        setProgress("");
       }
     },
     [useClientUpload],
@@ -190,7 +276,7 @@ export function HomeClient({ useClientUpload = false }: Props) {
 
         {uploading && (
           <p className="text-center text-sm text-amber-700 dark:text-amber-300">
-            Wird hochgeladen …
+            {progress || "Wird hochgeladen …"}
           </p>
         )}
         {error && (

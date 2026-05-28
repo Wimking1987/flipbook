@@ -27,6 +27,7 @@ export default async function EmbedPage({
     >
       <FlipbookViewer
         pdfUrl={pdfUrl}
+        docId={id}
         background={bg}
         embed
         className="min-h-0 flex-1"

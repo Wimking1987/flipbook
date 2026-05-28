@@ -24,6 +24,23 @@ export function iosLikeDevice(): boolean {
   return false;
 }
 
+/**
+ * Device-independent profile for pre-rendering page images at upload time.
+ * Slightly higher resolution so cached images look crisp on any screen.
+ */
+export function publishProfile(): RenderProfile {
+  return {
+    ios: false,
+    maxRasterWidth: 1600,
+    maxScale: 2,
+    maxPages: MAX_PDF_PAGES,
+    jpegQuality: 0.82,
+    maxCanvasSide: 4096,
+    maxCanvasPixels: 8_000_000,
+    maxImageSize: -1,
+  };
+}
+
 export function renderProfile(): RenderProfile {
   if (iosLikeDevice()) {
     return {
@@ -107,10 +124,10 @@ async function canvasToObjectUrl(
   }
 }
 
-export async function renderPdfPageToUrl(
+async function renderPageToCanvas(
   page: import("pdfjs-dist").PDFPageProxy,
   profile: RenderProfile,
-): Promise<string> {
+): Promise<{ canvas: HTMLCanvasElement; width: number; height: number }> {
   const base = page.getViewport({ scale: 1 });
   let scale = computeSafeScale(base.width, base.height, profile);
   let lastError: unknown = null;
@@ -128,9 +145,7 @@ export async function renderPdfPageToUrl(
 
     try {
       await page.render({ canvas, canvasContext: ctx, viewport }).promise;
-      const url = await canvasToObjectUrl(canvas, profile.jpegQuality);
-      releaseCanvas(canvas);
-      return url;
+      return { canvas, width: canvas.width, height: canvas.height };
     } catch (err) {
       lastError = err;
       releaseCanvas(canvas);
@@ -143,15 +158,38 @@ export async function renderPdfPageToUrl(
   throw new Error("page_render_failed");
 }
 
-export async function loadPdfDocument(
-  pdfjs: typeof import("pdfjs-dist"),
-  pdfUrl: string,
+export async function renderPdfPageToUrl(
+  page: import("pdfjs-dist").PDFPageProxy,
   profile: RenderProfile,
-): Promise<import("pdfjs-dist").PDFDocumentProxy> {
+): Promise<string> {
+  const { canvas } = await renderPageToCanvas(page, profile);
+  const url = await canvasToObjectUrl(canvas, profile.jpegQuality);
+  releaseCanvas(canvas);
+  return url;
+}
+
+/** Render a page to a JPEG Blob (used to pre-render and upload page images). */
+export async function renderPdfPageToBlob(
+  page: import("pdfjs-dist").PDFPageProxy,
+  profile: RenderProfile,
+): Promise<{ blob: Blob; width: number; height: number }> {
+  const { canvas, width, height } = await renderPageToCanvas(page, profile);
+  const blob = await new Promise<Blob | null>((resolve) => {
+    try {
+      canvas.toBlob((b) => resolve(b), "image/jpeg", profile.jpegQuality);
+    } catch {
+      resolve(null);
+    }
+  });
+  releaseCanvas(canvas);
+  if (!blob) throw new Error("canvas_export_failed");
+  return { blob, width, height };
+}
+
+function pdfDocInitBase(pdfjs: typeof import("pdfjs-dist"), profile: RenderProfile) {
   const pdfRoot = pdfJsPublicRoot();
   pdfjs.GlobalWorkerOptions.workerSrc = `${pdfRoot}pdf.worker.min.mjs`;
-
-  const docInitBase = {
+  return {
     wasmUrl: `${pdfRoot}wasm/`,
     standardFontDataUrl: `${pdfRoot}standard_fonts/`,
     cMapUrl: `${pdfRoot}cmaps/`,
@@ -161,6 +199,30 @@ export async function loadPdfDocument(
     isImageDecoderSupported: false,
     maxImageSize: profile.maxImageSize,
   };
+}
+
+/** Load a PDF from in-memory bytes (used for upload-side pre-rendering). */
+export async function loadPdfDocumentFromData(
+  pdfjs: typeof import("pdfjs-dist"),
+  data: ArrayBuffer | Uint8Array,
+  profile: RenderProfile,
+): Promise<import("pdfjs-dist").PDFDocumentProxy> {
+  const loadingTask = pdfjs.getDocument({
+    data,
+    disableAutoFetch: true,
+    disableStream: true,
+    disableRange: true,
+    ...pdfDocInitBase(pdfjs, profile),
+  });
+  return loadingTask.promise;
+}
+
+export async function loadPdfDocument(
+  pdfjs: typeof import("pdfjs-dist"),
+  pdfUrl: string,
+  profile: RenderProfile,
+): Promise<import("pdfjs-dist").PDFDocumentProxy> {
+  const docInitBase = pdfDocInitBase(pdfjs, profile);
 
   /**
    * blob:/data: URLs im Worker sind auf iPad oft blockiert — PDF im Hauptthread
