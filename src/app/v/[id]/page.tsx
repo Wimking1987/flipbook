@@ -42,6 +42,7 @@ export default async function ViewerPage({
         <div className="flex min-h-0 w-full max-w-5xl flex-1 flex-col">
           <FlipbookViewer
             pdfUrl={pdfUrl}
+            docId={id}
             background={bg}
             className="min-h-0 flex-1"
           />

@@ -16,12 +16,73 @@ export function uploadBlobPathname(id: string): string {
   return `${BLOB_PREFIX}/${id}.pdf`;
 }
 
-export function uploadIdFromPathname(pathname: string): string | null {
-  const match = new RegExp(
-    `^${BLOB_PREFIX}/([a-zA-Z0-9_-]{12,24})\\.pdf$`,
-  ).exec(pathname);
-  return match?.[1] ?? null;
+/** Pre-rendered page image, 1-based, zero-padded for stable ordering. */
+export function pageImageBlobPathname(id: string, page: number): string {
+  return `${BLOB_PREFIX}/${id}/p${String(page).padStart(4, "0")}.jpg`;
 }
+
+export function manifestBlobPathname(id: string): string {
+  return `${BLOB_PREFIX}/${id}/manifest.json`;
+}
+
+type UploadKind = "pdf" | "page" | "manifest";
+
+type AllowedUpload = {
+  id: string;
+  kind: UploadKind;
+  contentTypes: string[];
+};
+
+/**
+ * Validates a client-upload pathname and returns the id + allowed content types.
+ * Accepts the PDF, pre-rendered page images and the manifest for a given id.
+ */
+export function validateUploadPathname(pathname: string): AllowedUpload | null {
+  const id = "([a-zA-Z0-9_-]{12,24})";
+  const pdf = new RegExp(`^${BLOB_PREFIX}/${id}\\.pdf$`).exec(pathname);
+  if (pdf) {
+    return {
+      id: pdf[1],
+      kind: "pdf",
+      contentTypes: [
+        "application/pdf",
+        "application/x-pdf",
+        "application/octet-stream",
+      ],
+    };
+  }
+  const page = new RegExp(`^${BLOB_PREFIX}/${id}/p\\d{4}\\.jpg$`).exec(pathname);
+  if (page) {
+    return { id: page[1], kind: "page", contentTypes: ["image/jpeg"] };
+  }
+  const manifest = new RegExp(`^${BLOB_PREFIX}/${id}/manifest\\.json$`).exec(
+    pathname,
+  );
+  if (manifest) {
+    return {
+      id: manifest[1],
+      kind: "manifest",
+      contentTypes: ["application/json"],
+    };
+  }
+  return null;
+}
+
+export function uploadIdFromPathname(pathname: string): string | null {
+  return validateUploadPathname(pathname)?.id ?? null;
+}
+
+export const FLIP_MANIFEST_VERSION = 1;
+
+export type FlipManifest = {
+  v: number;
+  pages: number;
+  /** Aspect-defining dimensions of page 1 (px). */
+  width: number;
+  height: number;
+  /** Public image URLs, one per page, in order. */
+  images: string[];
+};
 
 export function buildUploadResult(
   id: string,
