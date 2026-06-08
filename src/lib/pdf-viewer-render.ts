@@ -41,6 +41,20 @@ export function publishProfile(): RenderProfile {
   };
 }
 
+/** Low-res cover for instant placeholder (~30–80 KB). */
+export function coverPublishProfile(): RenderProfile {
+  return {
+    ios: false,
+    maxRasterWidth: 520,
+    maxScale: 1.25,
+    maxPages: 1,
+    jpegQuality: 0.72,
+    maxCanvasSide: 640,
+    maxCanvasPixels: 400_000,
+    maxImageSize: -1,
+  };
+}
+
 export function renderProfile(): RenderProfile {
   if (iosLikeDevice()) {
     return {

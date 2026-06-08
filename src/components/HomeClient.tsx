@@ -11,6 +11,7 @@ import { looksLikeUploadedPdf } from "@/lib/accept-upload-pdf";
 import { MAX_PDF_BYTES } from "@/lib/constants";
 import {
   buildUploadResult,
+  coverBlobPathname,
   generateUploadId,
   manifestBlobPathname,
   pageImageBlobPathname,
@@ -22,6 +23,7 @@ import {
   type UploadResult,
 } from "@/lib/upload-shared";
 import {
+  coverPublishProfile,
   loadPdfDocumentFromData,
   publishProfile,
   renderPdfPageToBlob,
@@ -47,6 +49,21 @@ async function prerenderAndUploadPages(
   const images: string[] = [];
   let width = 0;
   let height = 0;
+  let coverUrl: string | undefined;
+
+  const page1 = await doc.getPage(1);
+  const coverBlob = await renderPdfPageToBlob(page1, coverPublishProfile());
+  try {
+    page1.cleanup();
+  } catch {
+    /* ignore */
+  }
+  const coverRes = await upload(coverBlobPathname(id), coverBlob.blob, {
+    access: "public",
+    handleUploadUrl: "/api/upload/client",
+    contentType: "image/jpeg",
+  });
+  coverUrl = coverRes.url;
 
   for (let i = 1; i <= numPages; i++) {
     const page = await doc.getPage(i);
@@ -79,6 +96,7 @@ async function prerenderAndUploadPages(
     pages: images.length,
     width,
     height,
+    cover: coverUrl,
     images,
   };
   const manifestBlob = new Blob([JSON.stringify(manifest)], {

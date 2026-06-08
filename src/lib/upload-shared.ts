@@ -25,6 +25,11 @@ export function manifestBlobPathname(id: string): string {
   return `${BLOB_PREFIX}/${id}/manifest.json`;
 }
 
+/** Small cover JPEG for instant placeholder while the flipbook initializes. */
+export function coverBlobPathname(id: string): string {
+  return `${BLOB_PREFIX}/${id}/cover.jpg`;
+}
+
 type UploadKind = "pdf" | "page" | "manifest";
 
 type AllowedUpload = {
@@ -50,6 +55,10 @@ export function validateUploadPathname(pathname: string): AllowedUpload | null {
         "application/octet-stream",
       ],
     };
+  }
+  const cover = new RegExp(`^${BLOB_PREFIX}/${id}/cover\\.jpg$`).exec(pathname);
+  if (cover) {
+    return { id: cover[1], kind: "page", contentTypes: ["image/jpeg"] };
   }
   const page = new RegExp(`^${BLOB_PREFIX}/${id}/p\\d{4}\\.jpg$`).exec(pathname);
   if (page) {
@@ -80,6 +89,8 @@ export type FlipManifest = {
   /** Aspect-defining dimensions of page 1 (px). */
   width: number;
   height: number;
+  /** Small cover JPEG for fast first paint (optional, added in v1+). */
+  cover?: string;
   /** Public image URLs, one per page, in order. */
   images: string[];
 };
