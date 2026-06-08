@@ -3,10 +3,14 @@ import { NextResponse } from "next/server";
 import { MAX_PDF_BYTES } from "@/lib/constants";
 import {
   uploadErrorMessage,
-  uploadIdFromPathname,
+  validateUploadPathname,
 } from "@/lib/upload-shared";
 
 export const maxDuration = 60;
+
+/** Generous per-page image cap; pages are downscaled JPEGs. */
+const MAX_PAGE_IMAGE_BYTES = 8 * 1024 * 1024;
+const MAX_MANIFEST_BYTES = 1 * 1024 * 1024;
 
 export async function POST(request: Request): Promise<NextResponse> {
   const body = (await request.json()) as HandleUploadBody;
@@ -16,20 +20,22 @@ export async function POST(request: Request): Promise<NextResponse> {
       body,
       request,
       onBeforeGenerateToken: async (pathname) => {
-        const id = uploadIdFromPathname(pathname);
-        if (!id) {
+        const allowed = validateUploadPathname(pathname);
+        if (!allowed) {
           throw new Error("invalid_pathname");
         }
+        const maximumSizeInBytes =
+          allowed.kind === "pdf"
+            ? MAX_PDF_BYTES
+            : allowed.kind === "page"
+              ? MAX_PAGE_IMAGE_BYTES
+              : MAX_MANIFEST_BYTES;
         return {
-          allowedContentTypes: [
-            "application/pdf",
-            "application/x-pdf",
-            "application/octet-stream",
-          ],
-          maximumSizeInBytes: MAX_PDF_BYTES,
+          allowedContentTypes: allowed.contentTypes,
+          maximumSizeInBytes,
           addRandomSuffix: false,
-          allowOverwrite: false,
-          tokenPayload: JSON.stringify({ id }),
+          allowOverwrite: true,
+          tokenPayload: JSON.stringify({ id: allowed.id, kind: allowed.kind }),
         };
       },
     });
